@@ -6,6 +6,8 @@ from dotenv import load_dotenv
 from pyrogram import Client, filters
 from pyrogram.types import Message, ForceReply
 from pyrogram.errors import BadRequest
+from flask import Flask
+from threading import Thread
 
 # --- Load Environment Variables ---
 load_dotenv()
@@ -14,6 +16,7 @@ API_ID = os.environ.get("API_ID")
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = os.environ.get("ADMIN_ID")
+PORT = int(os.environ.get("PORT", 5000))
 
 # --- Bot Initialization ---
 if not all([API_ID, API_HASH, BOT_TOKEN, ADMIN_ID]):
@@ -30,6 +33,16 @@ app = Client(
     api_hash=API_HASH,
     bot_token=BOT_TOKEN
 )
+
+# --- Flask Web Server for Render ---
+web_app = Flask(__name__)
+
+@web_app.route('/')
+def home():
+    return "Bot is running successfully! 🚀"
+
+def run_web_server():
+    web_app.run(host='0.0.0.0', port=PORT)
 
 # --- In-memory storage for user states ---
 user_tasks = {}
@@ -104,6 +117,24 @@ async def start_handler(client: Client, message: Message):
         "To get started, simply send me a file.",
         quote=True
     )
+
+@app.on_message(filters.command("status") & filters.private)
+async def status_handler(client: Client, message: Message):
+    """Handles the /status command to check bot status."""
+    user_id = message.from_user.id
+    if user_id != ADMIN_ID:
+        await message.reply_text("Sorry, this command is for admin only.", quote=True)
+        return
+        
+    status_text = (
+        "🤖 **Bot Status**\n"
+        f"• **Running on:** Render (Port {PORT})\n"
+        f"• **Active tasks:** {len(user_tasks)}\n"
+        f"• **Bot connected:** ✅\n"
+        f"• **Web server:** ✅\n"
+        "• **Support:** Contact admin for assistance"
+    )
+    await message.reply_text(status_text, quote=True)
 
 @app.on_message(filters.command("cancel") & filters.private)
 async def cancel_handler(client: Client, message: Message):
@@ -311,9 +342,19 @@ async def process_file(client: Client, message: Message):
         if user_id in user_tasks:
             del user_tasks[user_id]
 
-
-# --- Start the bot ---
+# --- Start the bot and web server ---
 if __name__ == "__main__":
-    print("Bot is starting...")
+    print(f"🤖 Bot is starting on port {PORT}...")
+    
+    # Start Flask web server in a separate thread
+    web_thread = Thread(target=run_web_server)
+    web_thread.daemon = True
+    web_thread.start()
+    
+    print("🌐 Web server started")
+    print("🔌 Connecting Telegram bot...")
+    
+    # Run the Pyrogram bot
     app.run()
+    
     print("Bot has stopped.")
