@@ -8,6 +8,7 @@ from pyrogram.types import Message, ForceReply
 from pyrogram.errors import BadRequest, FloodWait
 from flask import Flask
 from threading import Thread
+import math
 
 # --- Load Environment Variables ---
 load_dotenv()
@@ -21,7 +22,7 @@ PORT = int(os.environ.get("PORT", 5000))
 # --- Bot Initialization ---
 if not all([API_ID, API_HASH, BOT_TOKEN, ADMIN_ID]):
     raise ValueError("Missing one or more required environment variables: API_ID, API_HASH, BOT_TOKEN, ADMIN_ID")
-    
+
 try:
     ADMIN_ID = int(ADMIN_ID)
 except ValueError:
@@ -55,6 +56,7 @@ def run_web_server():
 
 # --- In-memory storage for user states ---
 user_tasks = {}
+progress_data = {}  # Store progress data for each user
 
 # --- Helper Functions ---
 def humanbytes(size):
@@ -69,6 +71,24 @@ def humanbytes(size):
         t_n += 1
     return f"{size:.2f} {power_dict[t_n]}"
 
+def format_time(seconds):
+    """Format seconds into HH:MM:SS or MM:SS"""
+    if seconds < 0:
+        return "00:00"
+    minutes, seconds = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    else:
+        return f"{minutes:02d}:{seconds:02d}"
+
+def create_progress_bar(percentage, bar_length=20):
+    """Create a visual progress bar"""
+    completed = math.floor(percentage / 100 * bar_length)
+    remaining = bar_length - completed
+    return "█" * completed + "░" * remaining
+
 async def safe_edit_message(message, text):
     """Safely edit a message with flood wait handling."""
     try:
@@ -79,6 +99,57 @@ async def safe_edit_message(message, text):
         await asyncio.sleep(e.value)
     except Exception:
         # Ignore other errors (message might be deleted)
+        pass
+
+async def progress_callback(current, total, user_id, action):
+    """Real-time progress callback with all metrics"""
+    if user_id not in progress_data:
+        return
+    
+    # Update progress data
+    progress_data[user_id].update({
+        'current': current,
+        'total': total,
+        'last_update': time.time()
+    })
+    
+    # Calculate metrics
+    data = progress_data[user_id]
+    elapsed = time.time() - data['start_time']
+    
+    if elapsed > 0 and current > 0:
+        speed = current / elapsed
+        if total > current and speed > 0:
+            eta = (total - current) / speed
+        else:
+            eta = 0
+    else:
+        speed = 0
+        eta = 0
+    
+    percentage = (current / total) * 100 if total > 0 else 0
+    
+    # Only update display every 1 second to avoid rate limiting
+    if time.time() - data.get('last_display_update', 0) < 1 and current != total:
+        return
+    
+    progress_data[user_id]['last_display_update'] = time.time()
+    
+    # Create progress display
+    progress_bar = create_progress_bar(percentage)
+    
+    progress_text = (
+        f"**{action}**\n\n"
+        f"`{progress_bar}` **{percentage:.1f}%**\n\n"
+        f"📊 **Progress:** {humanbytes(current)} / {humanbytes(total)}\n"
+        f"🚀 **Speed:** {humanbytes(speed)}/s\n"
+        f"⏱️ **Elapsed:** {format_time(elapsed)}\n"
+        f"⏳ **ETA:** {format_time(eta)}\n"
+    )
+    
+    try:
+        await safe_edit_message(data['status_message'], progress_text)
+    except Exception:
         pass
 
 # --- Command Handlers ---
@@ -116,9 +187,9 @@ async def cancel_handler(client: Client, message: Message):
     user_id = message.from_user.id
     if user_id in user_tasks:
         del user_tasks[user_id]
-        await message.reply_text("Your current task has been cancelled.", quote=True)
-    else:
-        await message.reply_text("You have no active tasks to cancel.", quote=True)
+    if user_id in progress_data:
+        del progress_data[user_id]
+    await message.reply_text("Your current task has been cancelled.", quote=True)
 
 # --- Main Logic Handlers ---
 @app.on_message(filters.private & (filters.document | filters.video | filters.audio))
@@ -218,16 +289,34 @@ async def process_file(client: Client, message: Message):
     if not task or "new_name" not in task:
         return
 
-    status_message = await message.reply_text("⏳ Processing your file...", quote=True)
+    status_message = await message.reply_text("⏳ Initializing...", quote=True)
+    
+    # Initialize progress data
+    progress_data[user_id] = {
+        'status_message': status_message,
+        'start_time': time.time(),
+        'current': 0,
+        'total': task.get('file_size', 0),
+        'last_update': time.time(),
+        'last_display_update': 0
+    }
     
     original_file_path = None
     thumbnail_path = None
     new_file_path = None
     
     try:
-        # 1. Download the file (INSTANT SPEED - no progress callback)
-        await safe_edit_message(status_message, "📥 Downloading file...")
-        original_file_path = await client.download_media(message=task["file_id"])
+        # 1. Download the file with progress tracking
+        await safe_edit_message(status_message, "📥 Starting download...")
+        
+        # Create custom progress callback
+        def download_progress(current, total):
+            asyncio.create_task(progress_callback(current, total, user_id, "📥 Downloading"))
+        
+        original_file_path = await client.download_media(
+            message=task["file_id"],
+            progress=download_progress
+        )
         
         if not original_file_path or not os.path.exists(original_file_path):
             await safe_edit_message(status_message, "❌ Failed to download the file.")
@@ -237,7 +326,7 @@ async def process_file(client: Client, message: Message):
         if task.get("thumbnail_id"):
             thumbnail_path = await client.download_media(task["thumbnail_id"])
 
-        await safe_edit_message(status_message, "✅ File downloaded. Renaming...")
+        await safe_edit_message(status_message, "✅ Download complete. Preparing to upload...")
         
         # 3. Prepare for upload
         new_file_path = os.path.join(os.path.dirname(original_file_path), task["new_name"])
@@ -245,18 +334,30 @@ async def process_file(client: Client, message: Message):
         # Use shutil.move instead of os.rename for cross-filesystem compatibility
         shutil.move(original_file_path, new_file_path)
 
-        # 4. Upload the file (INSTANT SPEED - no progress callback)
-        await safe_edit_message(status_message, "📤 Uploading file...")
-        
+        # 4. Upload the file with progress tracking
         caption = f"📁 Renamed to: `{task['new_name']}`"
         file_type = task["file_type"]
+        
+        # Reset progress for upload
+        progress_data[user_id].update({
+            'start_time': time.time(),
+            'current': 0,
+            'total': os.path.getsize(new_file_path),
+            'last_update': time.time(),
+            'last_display_update': 0
+        })
+        
+        # Create custom progress callback for upload
+        def upload_progress(current, total):
+            asyncio.create_task(progress_callback(current, total, user_id, "📤 Uploading"))
         
         if file_type == "document":
             await client.send_document(
                 chat_id=user_id,
                 document=new_file_path,
                 thumb=thumbnail_path,
-                caption=caption
+                caption=caption,
+                progress=upload_progress
             )
         elif file_type == "video":
             # Get video properties to maintain them
@@ -269,14 +370,16 @@ async def process_file(client: Client, message: Message):
                 caption=caption,
                 duration=video_meta.duration,
                 width=video_meta.width,
-                height=video_meta.height
+                height=video_meta.height,
+                progress=upload_progress
             )
         elif file_type == "audio":
             await client.send_audio(
                 chat_id=user_id,
                 audio=new_file_path,
                 thumb=thumbnail_path,
-                caption=caption
+                caption=caption,
+                progress=upload_progress
             )
 
         await safe_edit_message(status_message, "✅ Task completed successfully! File has been renamed and sent.")
@@ -299,7 +402,9 @@ async def process_file(client: Client, message: Message):
         except Exception as e:
             print(f"Error cleaning up files: {e}")
         
-        # Clean up task data
+        # Clean up progress data
+        if user_id in progress_data:
+            del progress_data[user_id]
         if user_id in user_tasks:
             del user_tasks[user_id]
 
