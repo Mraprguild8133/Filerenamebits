@@ -1,3 +1,9 @@
 pyrogram
 python-dotenv
 TgCrypto
+aiofiles
+aiohttp
+humanize
+python-telegram-bot
+requests
+pyTelegramBotAPI
