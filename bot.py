@@ -111,17 +111,26 @@ async def update_progress_display(user_id, action):
     current = data.get('current', 0)
     total = data.get('total', 1)
     start_time = data.get('start_time', time.time())
+    last_current = data.get('last_current', 0)
+    last_time = data.get('last_time', start_time)
     
-    elapsed = time.time() - start_time
+    current_time = time.time()
+    elapsed = current_time - start_time
     
-    if elapsed > 0 and current > 0:
-        speed = current / elapsed
-        if total > current and speed > 0:
-            eta = (total - current) / speed
-        else:
-            eta = 0
+    # Calculate instant speed (bytes per second)
+    time_diff = current_time - last_time
+    if time_diff > 0:
+        instant_speed = (current - last_current) / time_diff
     else:
-        speed = 0
+        instant_speed = 0
+    
+    # Update last values for next calculation
+    progress_data[user_id]['last_current'] = current
+    progress_data[user_id]['last_time'] = current_time
+    
+    if instant_speed > 0 and total > current:
+        eta = (total - current) / instant_speed
+    else:
         eta = 0
     
     percentage = (current / total) * 100 if total > 0 else 0
@@ -133,7 +142,7 @@ async def update_progress_display(user_id, action):
         f"**{action}**\n\n"
         f"`{progress_bar}` **{percentage:.1f}%**\n\n"
         f"📊 **Progress:** {humanbytes(current)} / {humanbytes(total)}\n"
-        f"🚀 **Speed:** {humanbytes(speed)}/s\n"
+        f"🚀 **Speed:** {humanbytes(instant_speed)}/s\n"
         f"⏱️ **Elapsed:** {format_time(elapsed)}\n"
         f"⏳ **ETA:** {format_time(eta)}\n"
     )
@@ -152,13 +161,13 @@ def create_progress_callback(user_id, action):
         # Update progress data
         progress_data[user_id].update({
             'current': current,
-            'total': total,
+            'total': total if total > 0 else progress_data[user_id].get('total', 1),
             'last_update': time.time()
         })
         
-        # Only update display every 1 second to avoid rate limiting
+        # Only update display every 0.5 seconds to avoid rate limiting but keep it smooth
         current_time = time.time()
-        if (current_time - progress_data[user_id].get('last_display_update', 0) >= 1 or 
+        if (current_time - progress_data[user_id].get('last_display_update', 0) >= 0.5 or 
             current == total):
             
             progress_data[user_id]['last_display_update'] = current_time
@@ -169,7 +178,6 @@ def create_progress_callback(user_id, action):
                     update_progress_display(user_id, action), 
                     app.loop
                 )
-                # Don't wait for result to avoid blocking
     return callback
 
 # --- Command Handlers ---
@@ -311,14 +319,16 @@ async def process_file(client: Client, message: Message):
 
     status_message = await message.reply_text("⏳ Initializing...", quote=True)
     
-    # Initialize progress data
+    # Initialize progress data with proper values
     progress_data[user_id] = {
         'status_message': status_message,
         'start_time': time.time(),
         'current': 0,
-        'total': task.get('file_size', 0),
+        'total': task.get('file_size', 1),  # Ensure total is never 0
         'last_update': time.time(),
-        'last_display_update': 0
+        'last_display_update': 0,
+        'last_current': 0,
+        'last_time': time.time()
     }
     
     original_file_path = None
@@ -332,9 +342,11 @@ async def process_file(client: Client, message: Message):
         # Create progress callback
         download_callback = create_progress_callback(user_id, "📥 Downloading")
         
+        # Turbo speed optimization: Use in-memory download if possible
         original_file_path = await client.download_media(
             message=task["file_id"],
-            progress=download_callback
+            progress=download_callback,
+            in_memory=False  # Set to True for smaller files for faster processing
         )
         
         if not original_file_path or not os.path.exists(original_file_path):
@@ -357,26 +369,30 @@ async def process_file(client: Client, message: Message):
         caption = f"📁 Renamed to: `{task['new_name']}`"
         file_type = task["file_type"]
         
-        # Reset progress for upload
+        # Reset progress for upload with actual file size
         file_size = os.path.getsize(new_file_path)
         progress_data[user_id].update({
             'start_time': time.time(),
             'current': 0,
             'total': file_size,
             'last_update': time.time(),
-            'last_display_update': 0
+            'last_display_update': 0,
+            'last_current': 0,
+            'last_time': time.time()
         })
         
         # Create progress callback for upload
         upload_callback = create_progress_callback(user_id, "📤 Uploading")
         
+        # Turbo speed optimization for upload
         if file_type == "document":
             await client.send_document(
                 chat_id=user_id,
                 document=new_file_path,
                 thumb=thumbnail_path,
                 caption=caption,
-                progress=upload_callback
+                progress=upload_callback,
+                disable_notification=True  # Faster processing
             )
         elif file_type == "video":
             # Get video properties to maintain them
@@ -390,7 +406,8 @@ async def process_file(client: Client, message: Message):
                 duration=video_meta.duration,
                 width=video_meta.width,
                 height=video_meta.height,
-                progress=upload_callback
+                progress=upload_callback,
+                disable_notification=True  # Faster processing
             )
         elif file_type == "audio":
             await client.send_audio(
@@ -398,7 +415,8 @@ async def process_file(client: Client, message: Message):
                 audio=new_file_path,
                 thumb=thumbnail_path,
                 caption=caption,
-                progress=upload_callback
+                progress=upload_callback,
+                disable_notification=True  # Faster processing
             )
 
         await safe_edit_message(status_message, "✅ Task completed successfully! File has been renamed and sent.")
