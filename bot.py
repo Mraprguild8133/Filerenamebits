@@ -44,7 +44,7 @@ async def progress_callback(current, total, message, start_time, action):
     diff = now - start_time
     if round(diff % 5.00) == 0 or current == total:
         percentage = current * 100 / total
-        speed = current / diff
+        speed = current / diff if diff > 0 else 0
         elapsed_time = round(diff)
         eta = round((total - current) / speed) if speed > 0 else 0
         
@@ -86,7 +86,7 @@ async def cancel_handler(client, message: Message):
         await message.reply_text("🤔 Nothing to cancel.", quote=True)
 
 # --- Message Handlers for File Processing ---
-@app.on_message(filters.document | filters.video | filters.audio, filters.private)
+@app.on_message((filters.document | filters.video | filters.audio) & filters.private)
 async def file_handler(client, message: Message):
     """Handles incoming files and presents action buttons."""
     user_id = message.from_user.id
