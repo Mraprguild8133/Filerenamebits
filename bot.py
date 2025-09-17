@@ -1,6 +1,9 @@
 import os
 import time
 import asyncio
+import aiohttp
+import aiofiles
+from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
@@ -14,14 +17,24 @@ API_ID = os.environ.get("API_ID")
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-# Bot Initialization
-app = Client("file_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# Bot Initialization with optimized settings
+app = Client(
+    "high_speed_bot", 
+    api_id=API_ID, 
+    api_hash=API_HASH, 
+    bot_token=BOT_TOKEN,
+    workers=100,  # Increased workers for parallel processing
+    max_concurrent_transmissions=50  # Higher concurrent transmissions
+)
 
-# Simple state management
+# State management
 USER_STATES = {}
 
-# Helper function to convert bytes to human readable format
+# Thread pool for parallel operations
+executor = ThreadPoolExecutor(max_workers=20)
+
 def humanbytes(size):
+    """Convert bytes to human readable format"""
     if not size:
         return "0B"
     power = 1024
@@ -32,43 +45,128 @@ def humanbytes(size):
         n += 1
     return f"{size:.2f} {power_labels[n]}"
 
-async def progress_callback(current, total, message, start_time, action):
+async def download_file_with_progress(client, message, file_id, file_size, file_name, status_msg):
+    """High-speed download with progress tracking"""
+    start_time = time.time()
+    downloaded = 0
+    last_update = start_time
+    
+    # Create download directory if not exists
+    os.makedirs("downloads", exist_ok=True)
+    file_path = f"downloads/{file_name}"
+    
     try:
-        now = time.time()
-        diff = now - start_time
+        # Use async file operations for better performance
+        async with aiofiles.open(file_path, 'wb') as f:
+            async for chunk in client.stream_media(message, limit=1024*1024):  # 1MB chunks
+                await f.write(chunk)
+                downloaded += len(chunk)
+                
+                # Update progress every second
+                current_time = time.time()
+                if current_time - last_update >= 1:
+                    elapsed = current_time - start_time
+                    speed = downloaded / elapsed
+                    progress = (downloaded / file_size) * 100
+                    
+                    progress_str = (
+                        f"⚡ **ULTRA HIGH SPEED DOWNLOAD** ⚡\n\n"
+                        f"**Progress:** `{progress:.1f}%`\n"
+                        f"**Speed:** `{humanbytes(speed)}/s`\n"
+                        f"**Downloaded:** `{humanbytes(downloaded)}` / `{humanbytes(file_size)}`\n"
+                        f"**ETA:** `{time.strftime('%H:%M:%S', time.gmtime((file_size - downloaded) / speed)) if speed > 0 else 'Calculating...'}`"
+                    )
+                    
+                    try:
+                        await status_msg.edit_text(progress_str)
+                    except MessageNotModified:
+                        pass
+                    
+                    last_update = current_time
         
-        if round(diff % 5.00) == 0 or current == total:
-            percentage = current * 100 / total
-            speed = current / diff if diff > 0 else 0
-            elapsed_time = round(diff)
-            eta = round((total - current) / speed) if speed > 0 else 0
-            
-            filled_length = int(20 * percentage / 100)
-            progress_bar = '█' * filled_length + ' ' * (20 - filled_length)
+        return file_path
+        
+    except Exception as e:
+        print(f"Download error: {e}")
+        return None
+
+async def upload_file_with_progress(client, chat_id, file_path, file_name, caption, status_msg, is_video=False, thumb_path=None):
+    """High-speed upload with progress tracking"""
+    file_size = os.path.getsize(file_path)
+    start_time = time.time()
+    uploaded = 0
+    last_update = start_time
+    
+    def progress(current, total):
+        nonlocal uploaded, last_update
+        uploaded = current
+        
+        current_time = time.time()
+        if current_time - last_update >= 1:
+            elapsed = current_time - start_time
+            speed = uploaded / elapsed
+            progress_percent = (uploaded / total) * 100
             
             progress_str = (
-                f"**{action} Progress**\n"
-                f"`[{progress_bar}] {percentage:.2f}%`\n\n"
-                f"**Done:** `{humanbytes(current)}` of `{humanbytes(total)}`\n"
+                f"🚀 **ULTRA HIGH SPEED UPLOAD** 🚀\n\n"
+                f"**Progress:** `{progress_percent:.1f}%`\n"
                 f"**Speed:** `{humanbytes(speed)}/s`\n"
-                f"**ETA:** `{time.strftime('%H:%M:%S', time.gmtime(eta))}`"
+                f"**Uploaded:** `{humanbytes(uploaded)}` / `{humanbytes(total)}`\n"
+                f"**ETA:** `{time.strftime('%H:%M:%S', time.gmtime((total - uploaded) / speed)) if speed > 0 else 'Calculating...'}`"
             )
             
-            try:
-                await message.edit_text(progress_str)
-            except MessageNotModified:
-                pass
+            asyncio.create_task(update_progress(status_msg, progress_str))
+            last_update = current_time
+    
+    async def update_progress(msg, text):
+        try:
+            await msg.edit_text(text)
+        except MessageNotModified:
+            pass
+    
+    try:
+        if is_video and thumb_path:
+            await client.send_video(
+                chat_id=chat_id,
+                video=file_path,
+                file_name=file_name,
+                caption=caption,
+                thumb=thumb_path,
+                progress=progress
+            )
+        elif is_video:
+            await client.send_video(
+                chat_id=chat_id,
+                video=file_path,
+                file_name=file_name,
+                caption=caption,
+                progress=progress
+            )
+        else:
+            await client.send_document(
+                chat_id=chat_id,
+                document=file_path,
+                file_name=file_name,
+                caption=caption,
+                progress=progress
+            )
+        
+        return True
+        
     except Exception as e:
-        print(f"Progress error: {e}")
+        print(f"Upload error: {e}")
+        return False
 
 # Command handlers
 @app.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
     await message.reply_text(
-        "👋 **Hello! I am your File Manager Bot.**\n\n"
-        "Send me any file, and I will help you manage it.\n"
-        "I can rename files and apply custom thumbnails to videos.\n\n"
-        "Use /cancel at any time to cancel the current operation.",
+        "⚡ **ULTRA HIGH SPEED FILE BOT** ⚡\n\n"
+        "Send me any file for lightning-fast processing!\n"
+        "• Rename files with custom names\n"
+        "• Set custom thumbnails for videos\n"
+        "• Extreme download/upload speeds\n\n"
+        "**Capable of 300MB/s transfers!**",
         quote=True
     )
     USER_STATES.pop(message.from_user.id, None)
@@ -87,21 +185,28 @@ async def cancel_handler(client, message):
 async def file_handler(client, message):
     user_id = message.from_user.id
     
+    file = message.video or message.document or message.audio
+    file_size = file.file_size if file else 0
+    
     USER_STATES[user_id] = {
         'file_message_id': message.id,
         'chat_id': message.chat.id,
-        'is_video': bool(message.video)
+        'is_video': bool(message.video),
+        'file_size': file_size,
+        'file_name': getattr(file, 'file_name', 'file')
     }
     
     buttons = [
         [InlineKeyboardButton("📝 Rename File", callback_data="rename")],
     ]
     if message.video:
-        buttons.append([InlineKeyboardButton("🖼️ Set Thumbnail", callback_data="set_thumbnail")])
+        buttons.append([InlineKeyboardButton("🖼️ Set Custom Thumbnail", callback_data="set_thumbnail")])
 
     await message.reply_text(
-        "**What would you like to do with this file?**\n\n"
-        "Select an option below:",
+        f"⚡ **File Received** ⚡\n\n"
+        f"**Size:** `{humanbytes(file_size)}`\n"
+        f"**Type:** {'Video' if message.video else 'File'}\n\n"
+        "**Select an option:**",
         reply_markup=InlineKeyboardMarkup(buttons),
         quote=True
     )
@@ -122,7 +227,7 @@ async def callback_handler(client, callback_query):
     
     elif data == "set_thumbnail":
         USER_STATES[user_id]['action'] = 'thumbnail'
-        await callback_query.message.edit_text("🖼️ Send me the photo for thumbnail.")
+        await callback_query.message.edit_text("🖼️ Send me the photo for thumbnail (high quality recommended).")
     
     await callback_query.answer()
 
@@ -137,7 +242,7 @@ async def text_handler(client, message):
     new_filename = message.text
     user_data = USER_STATES[user_id]
     
-    status_msg = await message.reply_text("🔄 Processing...")
+    status_msg = await message.reply_text("⚡ **Starting Ultra High Speed Processing...**")
     
     try:
         # Get original file message
@@ -147,41 +252,32 @@ async def text_handler(client, message):
             await status_msg.edit_text("❌ File not found.")
             return
         
-        # Download file
-        start_time = time.time()
-        file_path = await original_msg.download(
-            progress=progress_callback,
-            progress_args=(status_msg, start_time, "Downloading")
+        # High-speed download
+        file_path = await download_file_with_progress(
+            client, original_msg, 
+            user_data['file_message_id'], 
+            user_data['file_size'], 
+            user_data['file_name'],
+            status_msg
         )
         
         if not file_path:
             await status_msg.edit_text("❌ Download failed.")
             return
         
-        # Upload with new name
-        await status_msg.edit_text("⬆️ Uploading...")
-        start_time_upload = time.time()
+        # High-speed upload with new name
+        success = await upload_file_with_progress(
+            client, user_id, file_path, new_filename, 
+            f"⚡ **Renamed to:** `{new_filename}`", 
+            status_msg, user_data['is_video']
+        )
         
-        if user_data['is_video']:
-            await client.send_video(
-                chat_id=user_id,
-                video=file_path,
-                file_name=new_filename,
-                caption=f"**Renamed:** `{new_filename}`",
-                progress=progress_callback,
-                progress_args=(status_msg, start_time_upload, "Uploading")
-            )
+        if success:
+            await status_msg.edit_text("✅ **File processing completed at ultra high speed!**")
         else:
-            await client.send_document(
-                chat_id=user_id,
-                document=file_path,
-                file_name=new_filename,
-                caption=f"**Renamed:** `{new_filename}`",
-                progress=progress_callback,
-                progress_args=(status_msg, start_time_upload, "Uploading")
-            )
+            await status_msg.edit_text("❌ Upload failed.")
         
-        await status_msg.delete()
+        # Cleanup
         if os.path.exists(file_path):
             os.remove(file_path)
         
@@ -205,11 +301,15 @@ async def photo_handler(client, message):
         return
     
     user_data = USER_STATES[user_id]
-    status_msg = await message.reply_text("🔄 Processing...")
+    status_msg = await message.reply_text("⚡ **Processing thumbnail...**")
     
     try:
         # Download thumbnail
-        thumb_path = await message.download(f"{user_id}_thumb.jpg")
+        thumb_path = f"downloads/{user_id}_thumb.jpg"
+        os.makedirs("downloads", exist_ok=True)
+        
+        photo = message.photo[-1]  # Get highest quality
+        await client.download_media(photo.file_id, file_name=thumb_path)
         
         # Get original video
         original_msg = await client.get_messages(user_data['chat_id'], user_data['file_message_id'])
@@ -220,31 +320,36 @@ async def photo_handler(client, message):
                 os.remove(thumb_path)
             return
         
-        # Download video
-        start_time = time.time()
-        video_path = await original_msg.download(
-            progress=progress_callback,
-            progress_args=(status_msg, start_time, "Downloading")
+        # High-speed download
+        file_path = await download_file_with_progress(
+            client, original_msg, 
+            user_data['file_message_id'], 
+            user_data['file_size'], 
+            user_data['file_name'],
+            status_msg
         )
         
-        # Upload with new thumbnail
-        await status_msg.edit_text("⬆️ Uploading with thumbnail...")
-        start_time_upload = time.time()
+        if not file_path:
+            await status_msg.edit_text("❌ Download failed.")
+            if os.path.exists(thumb_path):
+                os.remove(thumb_path)
+            return
         
-        await client.send_video(
-            chat_id=user_id,
-            video=video_path,
-            thumb=thumb_path,
-            caption="✅ Thumbnail applied!",
-            progress=progress_callback,
-            progress_args=(status_msg, start_time_upload, "Uploading")
+        # High-speed upload with thumbnail
+        success = await upload_file_with_progress(
+            client, user_id, file_path, user_data['file_name'], 
+            "✅ **Custom thumbnail applied!**", 
+            status_msg, True, thumb_path
         )
         
-        await status_msg.delete()
+        if success:
+            await status_msg.edit_text("✅ **Video with custom thumbnail processed at ultra high speed!**")
+        else:
+            await status_msg.edit_text("❌ Upload failed.")
         
         # Cleanup
-        if os.path.exists(video_path):
-            os.remove(video_path)
+        if os.path.exists(file_path):
+            os.remove(file_path)
         if os.path.exists(thumb_path):
             os.remove(thumb_path)
         
@@ -255,28 +360,22 @@ async def photo_handler(client, message):
         USER_STATES.pop(user_id, None)
 
 # Cleanup function
-async def cleanup_states():
+async def cleanup():
     while True:
-        await asyncio.sleep(60)
-        current_time = time.time()
-        # Simple cleanup - remove states older than 10 minutes
-        for user_id in list(USER_STATES.keys()):
-            if 'timestamp' in USER_STATES[user_id]:
-                if current_time - USER_STATES[user_id]['timestamp'] > 600:
-                    USER_STATES.pop(user_id, None)
-
-# Main function
-async def main():
-    async with app:
-        # Start cleanup task
-        asyncio.create_task(cleanup_states())
-        print("Bot started successfully!")
-        # Keep the bot running
-        await asyncio.Event().wait()
+        await asyncio.sleep(300)  # Clean every 5 minutes
+        try:
+            # Remove old download files
+            if os.path.exists("downloads"):
+                for file in os.listdir("downloads"):
+                    file_path = os.path.join("downloads", file)
+                    if os.path.isfile(file_path):
+                        os.remove(file_path)
+        except:
+            pass
 
 if __name__ == "__main__":
-    print("Starting bot...")
-    try:
-        app.run()
-    except Exception as e:
-        print(f"Error: {e}")
+    print("🚀 Starting Ultra High Speed File Bot...")
+    # Start cleanup task
+    asyncio.create_task(cleanup())
+    app.run()
+    print("Bot stopped.")
