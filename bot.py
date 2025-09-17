@@ -1,12 +1,13 @@
 import os
 import time
 import asyncio
+import shutil
 from dotenv import load_dotenv
 from pyrogram import Client, filters
 from pyrogram.types import Message, ForceReply
+from pyrogram.errors import BadRequest
 
 # --- Load Environment Variables ---
-# Load variables from a .env file if it exists
 load_dotenv()
 
 API_ID = os.environ.get("API_ID")
@@ -15,17 +16,14 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = os.environ.get("ADMIN_ID")
 
 # --- Bot Initialization ---
-# Ensure required variables are set, otherwise raise an error
 if not all([API_ID, API_HASH, BOT_TOKEN, ADMIN_ID]):
     raise ValueError("Missing one or more required environment variables: API_ID, API_HASH, BOT_TOKEN, ADMIN_ID")
 
-# Convert ADMIN_ID from string to integer
 try:
     ADMIN_ID = int(ADMIN_ID)
 except ValueError:
     raise ValueError("ADMIN_ID must be a valid integer.")
 
-# Create the Pyrogram client
 app = Client(
     "file_renamer_bot",
     api_id=API_ID,
@@ -34,8 +32,6 @@ app = Client(
 )
 
 # --- In-memory storage for user states ---
-# This dictionary will hold the state of each user's request
-# Format: {user_id: {"file_id": ..., "file_type": ..., "message_id": ...}}
 user_tasks = {}
 
 # --- Helper Functions ---
@@ -55,10 +51,19 @@ async def progress_callback(current, total, message, start_time, action):
     """
     Updates the message with the current progress of an upload or download.
     """
+    # Handle division by zero error when total is 0
+    if total == 0:
+        progress_text = f"**{action}**\nProcessing file..."
+        try:
+            await message.edit_text(text=progress_text)
+        except Exception:
+            pass
+        return
+    
     now = time.time()
     diff = now - start_time
     if diff == 0:
-        diff = 0.001 # Avoid division by zero
+        diff = 0.001  # Avoid division by zero
 
     percentage = current * 100 / total
     speed = current / diff
@@ -82,7 +87,6 @@ async def progress_callback(current, total, message, start_time, action):
     try:
         await message.edit_text(text=progress_text)
     except Exception:
-        # Ignore errors if the message can't be edited (e.g., message deleted)
         pass
 
 # --- Command Handlers ---
@@ -99,14 +103,15 @@ async def start_handler(client: Client, message: Message):
 @app.on_message(filters.command("cancel") & filters.private)
 async def cancel_handler(client: Client, message: Message):
     """Handles the /cancel command to clear a user's current task."""
-    if message.from_user.id in user_tasks:
-        del user_tasks[message.from_user.id]
+    user_id = message.from_user.id
+    if user_id in user_tasks:
+        del user_tasks[user_id]
         await message.reply_text("Your current task has been cancelled.", quote=True)
     else:
         await message.reply_text("You have no active tasks to cancel.", quote=True)
 
 # --- Main Logic Handlers ---
-@app.on_message(filters.private & (filters.document | filters.video | filters.audio))
+@app.on_message(filters.private & (filters.document | filters.video | filters.audio | filters.photo))
 async def file_handler(client: Client, message: Message):
     """Handles incoming files and starts the renaming process."""
     user_id = message.from_user.id
@@ -114,6 +119,11 @@ async def file_handler(client: Client, message: Message):
     # Check if the user is the admin
     if user_id != ADMIN_ID:
         await message.reply_text("Sorry, this bot is for the admin's use only.", quote=True)
+        return
+
+    # If it's a photo but we're not in a thumbnail setting state, ignore it
+    if (message.photo and 
+        (user_id not in user_tasks or "new_name" not in user_tasks[user_id])):
         return
 
     file_type = None
@@ -127,6 +137,9 @@ async def file_handler(client: Client, message: Message):
     elif message.audio:
         file_type = "audio"
         file = message.audio
+    elif message.photo:
+        # This is handled in the thumbnail_handler
+        return
         
     if not file:
         return
@@ -155,9 +168,24 @@ async def name_and_thumbnail_handler(client: Client, message: Message):
         
     task = user_tasks[user_id]
 
+    # Handle the skip command
+    if message.text == "/skip" and task["file_type"] == "video":
+        task["thumbnail_id"] = None
+        await process_file(client, message)
+        return
+
     # This part handles the new file name
     if "new_name" not in task:
-        task["new_name"] = message.text
+        # Validate filename
+        if not message.text.strip() or any(c in message.text for c in '<>:"/\\|?*'):
+            await message.reply_text(
+                "Invalid file name. Please provide a valid file name without special characters.",
+                quote=True
+            )
+            return
+            
+        task["new_name"] = message.text.strip()
+        
         # If it's a video, ask for a thumbnail
         if task["file_type"] == "video":
             await message.reply_text(
@@ -168,16 +196,14 @@ async def name_and_thumbnail_handler(client: Client, message: Message):
         else:
             # If not a video, start processing immediately
             await process_file(client, message)
-    # This part handles the skip command
-    elif message.text == "/skip" and task["file_type"] == "video":
-        task["thumbnail_id"] = None
-        await process_file(client, message)
 
 @app.on_message(filters.private & filters.photo)
 async def thumbnail_handler(client: Client, message: Message):
     """Handles the custom thumbnail photo."""
     user_id = message.from_user.id
-    if user_id in user_tasks and "new_name" in user_tasks[user_id] and user_tasks[user_id]["file_type"] == "video":
+    if (user_id in user_tasks and 
+        "new_name" in user_tasks[user_id] and 
+        user_tasks[user_id]["file_type"] == "video"):
         user_tasks[user_id]["thumbnail_id"] = message.photo.file_id
         await process_file(client, message)
 
@@ -193,6 +219,7 @@ async def process_file(client: Client, message: Message):
     
     original_file_path = None
     thumbnail_path = None
+    new_file_path = None
     
     try:
         # 1. Download the file
@@ -203,6 +230,10 @@ async def process_file(client: Client, message: Message):
             progress_args=(status_message, start_time, "Downloading...")
         )
         
+        if not original_file_path or not os.path.exists(original_file_path):
+            await status_message.edit_text("Failed to download the file.")
+            return
+        
         # 2. Download thumbnail if provided
         if task.get("thumbnail_id"):
             thumbnail_path = await client.download_media(task["thumbnail_id"])
@@ -211,13 +242,15 @@ async def process_file(client: Client, message: Message):
         
         # 3. Prepare for upload
         new_file_path = os.path.join(os.path.dirname(original_file_path), task["new_name"])
-        os.rename(original_file_path, new_file_path)
+        
+        # Use shutil.move instead of os.rename for cross-filesystem compatibility
+        shutil.move(original_file_path, new_file_path)
 
         # 4. Upload the file
         caption = f"Renamed to: `{task['new_name']}`"
         file_type = task["file_type"]
         
-        start_time = time.time() # Reset timer for upload
+        start_time = time.time()  # Reset timer for upload
         
         if file_type == "document":
             await client.send_document(
@@ -256,16 +289,20 @@ async def process_file(client: Client, message: Message):
         await status_message.edit_text("Task completed successfully!")
 
     except Exception as e:
-        await status_message.edit_text(f"An error occurred: {e}")
-        print(e)
+        await status_message.edit_text(f"An error occurred: {str(e)}")
+        print(f"Error: {e}")
     finally:
         # Clean up files and task data
-        if original_file_path and os.path.exists(original_file_path):
-            os.remove(original_file_path)
-        if 'new_file_path' in locals() and os.path.exists(new_file_path):
-             os.remove(new_file_path)
-        if thumbnail_path and os.path.exists(thumbnail_path):
-            os.remove(thumbnail_path)
+        try:
+            if original_file_path and os.path.exists(original_file_path):
+                os.remove(original_file_path)
+            if new_file_path and os.path.exists(new_file_path):
+                os.remove(new_file_path)
+            if thumbnail_path and os.path.exists(thumbnail_path):
+                os.remove(thumbnail_path)
+        except Exception as e:
+            print(f"Error cleaning up files: {e}")
+        
         if user_id in user_tasks:
             del user_tasks[user_id]
 
