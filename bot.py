@@ -9,6 +9,7 @@ from pyrogram.errors import BadRequest, FloodWait
 from flask import Flask
 from threading import Thread
 import math
+from concurrent.futures import ThreadPoolExecutor
 
 # --- Load Environment Variables ---
 load_dotenv()
@@ -101,21 +102,17 @@ async def safe_edit_message(message, text):
         # Ignore other errors (message might be deleted)
         pass
 
-async def progress_callback(current, total, user_id, action):
-    """Real-time progress callback with all metrics"""
+async def update_progress_display(user_id, action):
+    """Update the progress display for a user"""
     if user_id not in progress_data:
         return
     
-    # Update progress data
-    progress_data[user_id].update({
-        'current': current,
-        'total': total,
-        'last_update': time.time()
-    })
-    
-    # Calculate metrics
     data = progress_data[user_id]
-    elapsed = time.time() - data['start_time']
+    current = data.get('current', 0)
+    total = data.get('total', 1)
+    start_time = data.get('start_time', time.time())
+    
+    elapsed = time.time() - start_time
     
     if elapsed > 0 and current > 0:
         speed = current / elapsed
@@ -128,12 +125,6 @@ async def progress_callback(current, total, user_id, action):
         eta = 0
     
     percentage = (current / total) * 100 if total > 0 else 0
-    
-    # Only update display every 1 second to avoid rate limiting
-    if time.time() - data.get('last_display_update', 0) < 1 and current != total:
-        return
-    
-    progress_data[user_id]['last_display_update'] = time.time()
     
     # Create progress display
     progress_bar = create_progress_bar(percentage)
@@ -151,6 +142,35 @@ async def progress_callback(current, total, user_id, action):
         await safe_edit_message(data['status_message'], progress_text)
     except Exception:
         pass
+
+def create_progress_callback(user_id, action):
+    """Create a progress callback function that updates progress_data"""
+    def callback(current, total):
+        if user_id not in progress_data:
+            return
+            
+        # Update progress data
+        progress_data[user_id].update({
+            'current': current,
+            'total': total,
+            'last_update': time.time()
+        })
+        
+        # Only update display every 1 second to avoid rate limiting
+        current_time = time.time()
+        if (current_time - progress_data[user_id].get('last_display_update', 0) >= 1 or 
+            current == total):
+            
+            progress_data[user_id]['last_display_update'] = current_time
+            
+            # Schedule the display update in the main event loop
+            if hasattr(app, 'loop'):
+                future = asyncio.run_coroutine_threadsafe(
+                    update_progress_display(user_id, action), 
+                    app.loop
+                )
+                # Don't wait for result to avoid blocking
+    return callback
 
 # --- Command Handlers ---
 @app.on_message(filters.command("start") & filters.private)
@@ -309,13 +329,12 @@ async def process_file(client: Client, message: Message):
         # 1. Download the file with progress tracking
         await safe_edit_message(status_message, "📥 Starting download...")
         
-        # Create custom progress callback
-        def download_progress(current, total):
-            asyncio.create_task(progress_callback(current, total, user_id, "📥 Downloading"))
+        # Create progress callback
+        download_callback = create_progress_callback(user_id, "📥 Downloading")
         
         original_file_path = await client.download_media(
             message=task["file_id"],
-            progress=download_progress
+            progress=download_callback
         )
         
         if not original_file_path or not os.path.exists(original_file_path):
@@ -339,17 +358,17 @@ async def process_file(client: Client, message: Message):
         file_type = task["file_type"]
         
         # Reset progress for upload
+        file_size = os.path.getsize(new_file_path)
         progress_data[user_id].update({
             'start_time': time.time(),
             'current': 0,
-            'total': os.path.getsize(new_file_path),
+            'total': file_size,
             'last_update': time.time(),
             'last_display_update': 0
         })
         
-        # Create custom progress callback for upload
-        def upload_progress(current, total):
-            asyncio.create_task(progress_callback(current, total, user_id, "📤 Uploading"))
+        # Create progress callback for upload
+        upload_callback = create_progress_callback(user_id, "📤 Uploading")
         
         if file_type == "document":
             await client.send_document(
@@ -357,7 +376,7 @@ async def process_file(client: Client, message: Message):
                 document=new_file_path,
                 thumb=thumbnail_path,
                 caption=caption,
-                progress=upload_progress
+                progress=upload_callback
             )
         elif file_type == "video":
             # Get video properties to maintain them
@@ -371,7 +390,7 @@ async def process_file(client: Client, message: Message):
                 duration=video_meta.duration,
                 width=video_meta.width,
                 height=video_meta.height,
-                progress=upload_progress
+                progress=upload_callback
             )
         elif file_type == "audio":
             await client.send_audio(
@@ -379,7 +398,7 @@ async def process_file(client: Client, message: Message):
                 audio=new_file_path,
                 thumb=thumbnail_path,
                 caption=caption,
-                progress=upload_progress
+                progress=upload_callback
             )
 
         await safe_edit_message(status_message, "✅ Task completed successfully! File has been renamed and sent.")
