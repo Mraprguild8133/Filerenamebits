@@ -195,7 +195,8 @@ async def photo_handler(client, message):
     
     if user_info['file_type'] != 'video':
         await message.reply_text("❌ Thumbnails can only be set for videos.")
-        del user_data[user_id]
+        if user_id in user_data:
+            del user_data[user_id]
         return
     
     status_msg = await message.reply_text("⏳ Processing thumbnail...")
@@ -239,17 +240,13 @@ async def photo_handler(client, message):
         for path in [video_path, thumb_path]:
             if os.path.exists(path):
                 os.remove(path)
-        del user_data[user_id]
+        if user_id in user_data:
+            del user_data[user_id]
         
     except Exception as e:
         await status_msg.edit_text(f"❌ Error: {str(e)}")
         if user_id in user_data:
             del user_data[user_id]
-
-# Error handler
-@app.on_errors()
-async def error_handler(client, error):
-    print(f"❌ Error occurred: {error}")
 
 # Main execution
 if __name__ == "__main__":
@@ -260,6 +257,7 @@ if __name__ == "__main__":
     print(f"📋 BOT_TOKEN: {BOT_TOKEN[:10]}...")  # Show only first 10 chars of token for security
     
     try:
+        print("🚀 Starting bot...")
         app.run()
         print("✅ Bot started successfully!")
     except Exception as e:
