@@ -15,13 +15,12 @@ load_dotenv()
 API_ID = os.environ.get("API_ID")
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_ID = os.environ.get("6300568870")
+ADMIN_ID = os.environ.get("ADMIN_ID")
 PORT = int(os.environ.get("PORT", 5000))
 
 # --- Bot Initialization ---
 if not all([API_ID, API_HASH, BOT_TOKEN, ADMIN_ID]):
     raise ValueError("Missing one or more required environment variables: API_ID, API_HASH, BOT_TOKEN, ADMIN_ID")
-
 try:
     ADMIN_ID = int(ADMIN_ID)
 except ValueError:
