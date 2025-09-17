@@ -1,7 +1,6 @@
 import os
 import time
 import asyncio
-import aiohttp
 import aiofiles
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
@@ -23,8 +22,8 @@ app = Client(
     api_id=API_ID, 
     api_hash=API_HASH, 
     bot_token=BOT_TOKEN,
-    workers=100,  # Increased workers for parallel processing
-    max_concurrent_transmissions=50  # Higher concurrent transmissions
+    workers=100,
+    max_concurrent_transmissions=50
 )
 
 # State management
@@ -45,7 +44,7 @@ def humanbytes(size):
         n += 1
     return f"{size:.2f} {power_labels[n]}"
 
-async def download_file_with_progress(client, message, file_id, file_size, file_name, status_msg):
+async def download_file_with_progress(client, message, file_size, file_name, status_msg):
     """High-speed download with progress tracking"""
     start_time = time.time()
     downloaded = 0
@@ -255,7 +254,6 @@ async def text_handler(client, message):
         # High-speed download
         file_path = await download_file_with_progress(
             client, original_msg, 
-            user_data['file_message_id'], 
             user_data['file_size'], 
             user_data['file_name'],
             status_msg
@@ -323,7 +321,6 @@ async def photo_handler(client, message):
         # High-speed download
         file_path = await download_file_with_progress(
             client, original_msg, 
-            user_data['file_message_id'], 
             user_data['file_size'], 
             user_data['file_name'],
             status_msg
@@ -361,6 +358,7 @@ async def photo_handler(client, message):
 
 # Cleanup function
 async def cleanup():
+    """Background cleanup task"""
     while True:
         await asyncio.sleep(300)  # Clean every 5 minutes
         try:
@@ -369,13 +367,38 @@ async def cleanup():
                 for file in os.listdir("downloads"):
                     file_path = os.path.join("downloads", file)
                     if os.path.isfile(file_path):
-                        os.remove(file_path)
-        except:
-            pass
+                        # Remove files older than 1 hour
+                        if time.time() - os.path.getctime(file_path) > 3600:
+                            os.remove(file_path)
+        except Exception as e:
+            print(f"Cleanup error: {e}")
+
+# Startup handler
+@app.on_raw_update()
+async def on_startup(client, update, users, chats):
+    """Start cleanup task when bot starts"""
+    if not hasattr(client, 'cleanup_started'):
+        client.cleanup_started = True
+        asyncio.create_task(cleanup())
+        print("🚀 Ultra High Speed File Bot Started!")
+        print("⚡ Cleanup task initialized!")
 
 if __name__ == "__main__":
     print("🚀 Starting Ultra High Speed File Bot...")
-    # Start cleanup task
-    asyncio.create_task(cleanup())
-    app.run()
-    print("Bot stopped.")
+    
+    # Create downloads directory
+    os.makedirs("downloads", exist_ok=True)
+    
+    # Run the bot
+    try:
+        app.run()
+    except Exception as e:
+        print(f"❌ Error starting bot: {e}")
+    finally:
+        print("Bot stopped.")
+        # Cleanup when bot stops
+        if os.path.exists("downloads"):
+            for file in os.listdir("downloads"):
+                file_path = os.path.join("downloads", file)
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
