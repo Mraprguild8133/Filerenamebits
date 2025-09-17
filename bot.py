@@ -5,7 +5,7 @@ import shutil
 from dotenv import load_dotenv
 from pyrogram import Client, filters
 from pyrogram.types import Message, ForceReply
-from pyrogram.errors import BadRequest
+from pyrogram.errors import BadRequest, FloodWait
 from flask import Flask
 from threading import Thread
 
@@ -15,7 +15,7 @@ load_dotenv()
 API_ID = os.environ.get("API_ID")
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_ID = os.environ.get("ADMIN_ID")
+ADMIN_ID = os.environ.get("6300568870")
 PORT = int(os.environ.get("PORT", 5000))
 
 # --- Bot Initialization ---
@@ -41,11 +41,21 @@ web_app = Flask(__name__)
 def home():
     return "Bot is running successfully! 🚀"
 
+@web_app.route('/status')
+def status():
+    return {
+        "status": "online",
+        "port": PORT,
+        "bot_connected": True,
+        "active_tasks": len(user_tasks)
+    }
+
 def run_web_server():
     web_app.run(host='0.0.0.0', port=PORT)
 
 # --- In-memory storage for user states ---
 user_tasks = {}
+last_progress_update = {}
 
 # --- Helper Functions ---
 def humanbytes(size):
@@ -65,10 +75,20 @@ async def progress_callback(current, total, message, start_time, action):
     Updates the message with the current progress of an upload or download.
     """
     try:
+        # Rate limiting: Only update progress every 2 seconds
+        user_id = message.chat.id
+        current_time = time.time()
+        
+        if user_id in last_progress_update:
+            if current_time - last_progress_update[user_id] < 2:
+                return
+        
+        last_progress_update[user_id] = current_time
+        
         # Handle division by zero error when total is 0
         if total == 0:
             progress_text = f"**{action}**\nProcessing file..."
-            await message.edit_text(text=progress_text)
+            await safe_edit_message(message, progress_text)
             return
         
         now = time.time()
@@ -95,16 +115,26 @@ async def progress_callback(current, total, message, start_time, action):
             f"**ETA:** {time.strftime('%Hh %Mm %Ss', time.gmtime(eta))}\n"
         )
         
-        await message.edit_text(text=progress_text)
+        await safe_edit_message(message, progress_text)
+        
     except ZeroDivisionError:
         # If we still get a division by zero, show a simple progress message
         progress_text = f"**{action}**\nProcessing file..."
-        try:
-            await message.edit_text(text=progress_text)
-        except Exception:
-            pass
+        await safe_edit_message(message, progress_text)
     except Exception:
         # Ignore other errors (e.g., message deleted)
+        pass
+
+async def safe_edit_message(message, text):
+    """Safely edit a message with flood wait handling."""
+    try:
+        await message.edit_text(text=text)
+    except FloodWait as e:
+        # If we hit a flood wait, just wait it out
+        print(f"Flood wait: Waiting {e.value} seconds")
+        await asyncio.sleep(e.value)
+    except Exception:
+        # Ignore other errors (message might be deleted)
         pass
 
 # --- Command Handlers ---
@@ -132,9 +162,18 @@ async def status_handler(client: Client, message: Message):
         f"• **Active tasks:** {len(user_tasks)}\n"
         f"• **Bot connected:** ✅\n"
         f"• **Web server:** ✅\n"
-        "• **Support:** Contact admin for assistance"
+        "• **Support:** Contact admin for assistance\n\n"
+        "💡 _This message will auto-delete in 30 seconds_"
     )
-    await message.reply_text(status_text, quote=True)
+    status_msg = await message.reply_text(status_text, quote=True)
+    
+    # Auto-delete status message after 30 seconds
+    await asyncio.sleep(30)
+    try:
+        await status_msg.delete()
+        await message.delete()
+    except:
+        pass
 
 @app.on_message(filters.command("cancel") & filters.private)
 async def cancel_handler(client: Client, message: Message):
@@ -142,6 +181,8 @@ async def cancel_handler(client: Client, message: Message):
     user_id = message.from_user.id
     if user_id in user_tasks:
         del user_tasks[user_id]
+        if user_id in last_progress_update:
+            del last_progress_update[user_id]
         await message.reply_text("Your current task has been cancelled.", quote=True)
     else:
         await message.reply_text("You have no active tasks to cancel.", quote=True)
@@ -274,7 +315,7 @@ async def process_file(client: Client, message: Message):
         if task.get("thumbnail_id"):
             thumbnail_path = await client.download_media(task["thumbnail_id"])
 
-        await status_message.edit_text("File downloaded. Preparing to upload...")
+        await safe_edit_message(status_message, "File downloaded. Preparing to upload...")
         
         # 3. Prepare for upload
         new_file_path = os.path.join(os.path.dirname(original_file_path), task["new_name"])
@@ -322,10 +363,14 @@ async def process_file(client: Client, message: Message):
                 progress_args=(status_message, start_time, "Uploading...")
             )
 
-        await status_message.edit_text("Task completed successfully!")
+        await safe_edit_message(status_message, "✅ Task completed successfully!")
 
+    except FloodWait as e:
+        await safe_edit_message(status_message, f"⏳ Please wait {e.value} seconds due to rate limits...")
+        await asyncio.sleep(e.value)
+        await process_file(client, message)  # Retry
     except Exception as e:
-        await status_message.edit_text(f"An error occurred: {str(e)}")
+        await safe_edit_message(status_message, f"❌ An error occurred: {str(e)}")
         print(f"Error: {e}")
     finally:
         # Clean up files and task data
@@ -339,6 +384,9 @@ async def process_file(client: Client, message: Message):
         except Exception as e:
             print(f"Error cleaning up files: {e}")
         
+        # Clean up progress tracking
+        if user_id in last_progress_update:
+            del last_progress_update[user_id]
         if user_id in user_tasks:
             del user_tasks[user_id]
 
