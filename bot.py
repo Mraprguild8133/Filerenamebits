@@ -25,6 +25,7 @@ app = Client("file_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 # Dictionary to hold user states and data with timestamp for cleanup
 USER_DATA: Dict[int, Dict[str, Any]] = {}
 STATE_TIMEOUT = 300  # 5 minutes
+cleanup_task = None
 
 # --- Helper Functions ---
 def humanbytes(size: int) -> str:
@@ -105,7 +106,7 @@ def set_user_state(user_id: int, state_data: Dict[str, Any]):
     state_data['timestamp'] = time.time()
     USER_DATA[user_id] = state_data
 
-# --- Command Handlers ---
+# --- Startup Handler ---
 @app.on_message(filters.command("start") & filters.private)
 async def start_handler(client: Client, message: Message):
     """Handles the /start command."""
@@ -325,23 +326,24 @@ async def photo_handler(client: Client, message: Message):
         await status_msg.edit_text("❌ An error occurred during processing. Please try again.")
         USER_DATA.pop(user_id, None)
 
-# --- Startup and Shutdown ---
-@app.on_start()
-async def on_start(client: Client):
-    """Run when the bot starts"""
-    print("Bot is starting...")
-    # Start the cleanup task
-    asyncio.create_task(cleanup_states())
-
-@app.on_stop()
-async def on_stop(client: Client):
-    """Run when the bot stops"""
-    print("Bot has stopped.")
-
 # --- Main execution ---
 if __name__ == "__main__":
     try:
-        print("Starting bot...")
-        app.run()
+        print("Bot is starting...")
+        
+        # Start the cleanup task when the bot starts
+        async def main():
+            async with app:
+                # Start the cleanup task
+                cleanup_task = asyncio.create_task(cleanup_states())
+                print("Bot started successfully!")
+                # Keep the bot running
+                await asyncio.sleep(86400)  # Sleep for 24 hours
+        
+        # Run the main function
+        asyncio.run(main())
+        
     except Exception as e:
         print(f"Error running bot: {e}")
+    finally:
+        print("Bot has stopped.")
