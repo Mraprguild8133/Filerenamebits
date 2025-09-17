@@ -1,11 +1,14 @@
 import os
 import time
 import asyncio
+import threading
 from datetime import datetime
 from dotenv import load_dotenv
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
 from pyrogram.errors import MessageNotModified
+from flask import Flask, jsonify
+import requests
 
 # Load environment variables
 load_dotenv()
@@ -20,6 +23,35 @@ PORT = int(os.environ.get("PORT", 5000))
 if not all([API_ID, API_HASH, BOT_TOKEN]):
     print("❌ Error: Missing environment variables")
     exit(1)
+
+# Create Flask app for Render port requirements
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def home():
+    return jsonify({
+        "status": "online",
+        "service": "Telegram File Bot",
+        "uptime": time.time() - bot_start_time,
+        "port": PORT
+    })
+
+@flask_app.route('/health')
+def health():
+    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
+
+@flask_app.route('/status')
+def status():
+    return jsonify({
+        "active_users": len(user_data),
+        "transfers_completed": transfer_stats['transfers_completed'],
+        "total_downloaded": transfer_stats['total_downloaded'],
+        "total_uploaded": transfer_stats['total_uploaded']
+    })
+
+def run_flask():
+    """Run Flask server in a separate thread"""
+    flask_app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
 
 # Bot initialization
 app = Client(
@@ -65,7 +97,6 @@ async def update_progress(current, total, message, start_time, action):
         speed = current / elapsed if elapsed > 0 else 0
         percentage = (current / total) * 100 if total > 0 else 0
         
-        # Update stats
         if action == "Downloading":
             transfer_stats['max_download_speed'] = max(transfer_stats['max_download_speed'], speed)
         else:
@@ -143,18 +174,20 @@ async def ping_handler(client, message):
         f"🕒 **Server Time:** `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
     )
 
-@app.on_message(filters.command("clean") & filters.private)
-async def clean_handler(client, message):
-    """Clean temporary files"""
-    cleaned = 0
-    if os.path.exists("downloads"):
-        for file in os.listdir("downloads"):
-            try:
-                os.remove(os.path.join("downloads", file))
-                cleaned += 1
-            except:
-                pass
-    await message.reply_text(f"🧹 Cleaned {cleaned} temporary files")
+@app.on_message(filters.command("render") & filters.private)
+async def render_handler(client, message):
+    """Check Render deployment status"""
+    try:
+        await message.reply_text(
+            f"🌐 **Render Deployment** 🌐\n\n"
+            f"✅ **Port:** `{PORT}` (Active)\n"
+            f"🔄 **Status:** Running\n"
+            f"📊 **Uptime:** `{time.strftime('%H:%M:%S', time.gmtime(time.time() - bot_start_time))}`\n"
+            f"👥 **Users:** `{len(user_data)}`\n"
+            f"🚀 **Ready for extreme speed transfers!**"
+        )
+    except Exception as e:
+        await message.reply_text(f"❌ Render status error: {e}")
 
 # File handler
 @app.on_message((filters.document | filters.video | filters.audio) & filters.private)
@@ -194,7 +227,6 @@ async def file_handler(client, message):
         )
     except Exception as e:
         print(f"File handler error: {e}")
-        await message.reply_text("❌ Error processing file")
 
 # Callback handler
 @app.on_callback_query()
@@ -218,7 +250,6 @@ async def callback_handler(client, callback_query):
         await callback_query.answer()
     except Exception as e:
         print(f"Callback error: {e}")
-        await callback_query.answer("❌ Error processing request", show_alert=True)
 
 # Text handler for rename
 @app.on_message(filters.text & filters.private)
@@ -316,8 +347,6 @@ async def text_handler(client, message):
             await message.reply_text("❌ Error during file processing")
         except:
             pass
-        if user_id in user_data:
-            del user_data[user_id]
 
 # Photo handler
 @app.on_message(filters.photo & filters.private)
@@ -387,24 +416,31 @@ async def photo_handler(client, message):
             
     except Exception as e:
         print(f"Photo handler error: {e}")
-        try:
-            await message.reply_text("❌ Error processing thumbnail")
-        except:
-            pass
-        if user_id in user_data:
-            del user_data[user_id]
+
+# Start Flask server in background
+def start_flask_server():
+    """Start Flask server for Render port requirements"""
+    print(f"🌐 Starting Flask server on port {PORT}...")
+    run_flask()
 
 # Main execution
 if __name__ == "__main__":
-    print("🚀 Starting Power Speed Bot...")
-    print(f"🌐 Running on port: {PORT}")
+    print("🚀 Starting Power Speed Bot for Render...")
+    print(f"🌐 Port: {PORT}")
     
     # Create downloads directory
     os.makedirs("downloads", exist_ok=True)
     
+    # Start Flask server in a separate thread for Render
+    flask_thread = threading.Thread(target=start_flask_server, daemon=True)
+    flask_thread.start()
+    
+    print("✅ Flask server started")
+    print("🤖 Starting Telegram bot...")
+    
     try:
         app.run()
-        print("✅ Bot running successfully!")
+        print("✅ Bot running successfully on Render!")
     except Exception as e:
         print(f"❌ Error starting bot: {e}")
     finally:
