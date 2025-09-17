@@ -123,21 +123,27 @@ async def rename_handler(client, message: Message):
         if not original_msg:
             return await status.edit_text("❌ Could not retrieve original file.")
 
-        # Download
-        start = time.time()
+        # Make sure downloads folder exists
         os.makedirs("downloads", exist_ok=True)
+        out_path = os.path.join("downloads", new_name)
+
+        # Download (let pyrogram decide if custom filename fails)
+        start = time.time()
         dl_path = await client.download_media(
             original_msg,
-            file_name=os.path.join("downloads", new_name),
+            file_name=out_path if new_name else "downloads/",
             progress=lambda cur, tot: asyncio.create_task(
                 update_progress(cur, tot, status, start, "Downloading", uid)
             )
         )
-        if not dl_path:
-            return await status.edit_text("❌ Download failed.")
+
+        if not dl_path or not os.path.exists(dl_path):
+            logger.error(f"Download failed, returned: {dl_path}")
+            return await status.edit_text("❌ Download failed. Please retry.")
+
         transfer_stats["total_downloaded"] += info["file_size"]
 
-        # Upload
+        # Upload back as document (safe for all formats)
         start = time.time()
         await client.send_document(
             uid,
@@ -166,4 +172,4 @@ async def rename_handler(client, message: Message):
 if __name__ == "__main__":
     logger.info("🚀 Bot started")
     app.run()
-    
+                            
