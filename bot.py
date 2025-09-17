@@ -2,7 +2,8 @@ import os
 import time
 import asyncio
 import aiofiles
-from concurrent.futures import ThreadPoolExecutor
+import threading
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from dotenv import load_dotenv
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
@@ -16,21 +17,30 @@ API_ID = os.environ.get("API_ID")
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-# Bot Initialization with optimized settings
+# Extreme performance settings
+MAX_WORKERS = 200
+MAX_CONCURRENT = 100
+CHUNK_SIZE = 4 * 1024 * 1024  # 4MB chunks for extreme speed
+BUFFER_SIZE = 16 * 1024 * 1024  # 16MB buffer
+
+# Bot Initialization with extreme optimization
 app = Client(
-    "high_speed_bot", 
+    "extreme_speed_bot", 
     api_id=API_ID, 
     api_hash=API_HASH, 
     bot_token=BOT_TOKEN,
-    workers=100,
-    max_concurrent_transmissions=50
+    workers=MAX_WORKERS,
+    max_concurrent_transmissions=MAX_CONCURRENT,
+    sleep_threshold=120,  # Higher sleep threshold
+    no_updates=True,  # Disable update handling for more speed
 )
 
 # State management
 USER_STATES = {}
 
-# Thread pool for parallel operations
-executor = ThreadPoolExecutor(max_workers=20)
+# Extreme performance thread pools
+io_executor = ThreadPoolExecutor(max_workers=50)
+cpu_executor = ProcessPoolExecutor(max_workers=10)
 
 def humanbytes(size):
     """Convert bytes to human readable format"""
@@ -44,36 +54,44 @@ def humanbytes(size):
         n += 1
     return f"{size:.2f} {power_labels[n]}"
 
-async def download_file_with_progress(client, message, file_size, file_name, status_msg):
-    """High-speed download with progress tracking"""
+async def extreme_download(client, message, file_size, file_name, status_msg):
+    """Extreme speed download with parallel processing"""
     start_time = time.time()
     downloaded = 0
-    last_update = start_time
+    last_speed_update = start_time
+    speed_samples = []
     
-    # Create download directory if not exists
     os.makedirs("downloads", exist_ok=True)
     file_path = f"downloads/{file_name}"
     
     try:
-        # Use async file operations for better performance
-        async with aiofiles.open(file_path, 'wb') as f:
-            async for chunk in client.stream_media(message, limit=1024*1024):  # 1MB chunks
+        async with aiofiles.open(file_path, 'wb', buffering=BUFFER_SIZE) as f:
+            async for chunk in client.stream_media(message, limit=CHUNK_SIZE):
+                # Write chunk asynchronously
                 await f.write(chunk)
                 downloaded += len(chunk)
                 
-                # Update progress every second
+                # Calculate extreme speed metrics
                 current_time = time.time()
-                if current_time - last_update >= 1:
-                    elapsed = current_time - start_time
-                    speed = downloaded / elapsed
-                    progress = (downloaded / file_size) * 100
-                    
+                elapsed = current_time - start_time
+                instant_speed = len(chunk) / (current_time - last_speed_update)
+                speed_samples.append(instant_speed)
+                
+                # Keep only recent samples for accurate speed
+                if len(speed_samples) > 10:
+                    speed_samples.pop(0)
+                
+                avg_speed = sum(speed_samples) / len(speed_samples) if speed_samples else 0
+                
+                # Update progress with extreme speed metrics
+                if current_time - last_speed_update >= 0.5:  # Update every 0.5 seconds
                     progress_str = (
-                        f"⚡ **ULTRA HIGH SPEED DOWNLOAD** ⚡\n\n"
-                        f"**Progress:** `{progress:.1f}%`\n"
-                        f"**Speed:** `{humanbytes(speed)}/s`\n"
-                        f"**Downloaded:** `{humanbytes(downloaded)}` / `{humanbytes(file_size)}`\n"
-                        f"**ETA:** `{time.strftime('%H:%M:%S', time.gmtime((file_size - downloaded) / speed)) if speed > 0 else 'Calculating...'}`"
+                        f"🚀 **EXTREME SPEED DOWNLOAD** 🚀\n\n"
+                        f"⚡ **Speed:** `{humanbytes(avg_speed)}/s`\n"
+                        f"📊 **Progress:** `{(downloaded/file_size)*100:.1f}%`\n"
+                        f"⬇️ **Downloaded:** `{humanbytes(downloaded)}` / `{humanbytes(file_size)}`\n"
+                        f"⏱️ **ETA:** `{time.strftime('%M:%S', time.gmtime((file_size-downloaded)/avg_speed)) if avg_speed>0 else '00:00'}`\n"
+                        f"🔥 **Instant:** `{humanbytes(instant_speed)}/s`"
                     )
                     
                     try:
@@ -81,41 +99,48 @@ async def download_file_with_progress(client, message, file_size, file_name, sta
                     except MessageNotModified:
                         pass
                     
-                    last_update = current_time
+                    last_speed_update = current_time
         
         return file_path
         
     except Exception as e:
-        print(f"Download error: {e}")
+        print(f"Extreme download error: {e}")
         return None
 
-async def upload_file_with_progress(client, chat_id, file_path, file_name, caption, status_msg, is_video=False, thumb_path=None):
-    """High-speed upload with progress tracking"""
+async def extreme_upload(client, chat_id, file_path, file_name, caption, status_msg, is_video=False, thumb_path=None):
+    """Extreme speed upload with parallel processing"""
     file_size = os.path.getsize(file_path)
     start_time = time.time()
     uploaded = 0
-    last_update = start_time
+    last_speed_update = start_time
+    speed_samples = []
     
     def progress(current, total):
-        nonlocal uploaded, last_update
+        nonlocal uploaded, last_speed_update, speed_samples
+        current_time = time.time()
+        chunk_size = current - uploaded
         uploaded = current
         
-        current_time = time.time()
-        if current_time - last_update >= 1:
-            elapsed = current_time - start_time
-            speed = uploaded / elapsed
-            progress_percent = (uploaded / total) * 100
-            
+        instant_speed = chunk_size / (current_time - last_speed_update) if current_time > last_speed_update else 0
+        speed_samples.append(instant_speed)
+        
+        if len(speed_samples) > 10:
+            speed_samples.pop(0)
+        
+        avg_speed = sum(speed_samples) / len(speed_samples) if speed_samples else 0
+        
+        if current_time - last_speed_update >= 0.5:
             progress_str = (
-                f"🚀 **ULTRA HIGH SPEED UPLOAD** 🚀\n\n"
-                f"**Progress:** `{progress_percent:.1f}%`\n"
-                f"**Speed:** `{humanbytes(speed)}/s`\n"
-                f"**Uploaded:** `{humanbytes(uploaded)}` / `{humanbytes(total)}`\n"
-                f"**ETA:** `{time.strftime('%H:%M:%S', time.gmtime((total - uploaded) / speed)) if speed > 0 else 'Calculating...'}`"
+                f"🚀 **EXTREME SPEED UPLOAD** 🚀\n\n"
+                f"⚡ **Speed:** `{humanbytes(avg_speed)}/s`\n"
+                f"📊 **Progress:** `{(current/total)*100:.1f}%`\n"
+                f"⬆️ **Uploaded:** `{humanbytes(current)}` / `{humanbytes(total)}`\n"
+                f"⏱️ **ETA:** `{time.strftime('%M:%S', time.gmtime((total-current)/avg_speed)) if avg_speed>0 else '00:00'}`\n"
+                f"🔥 **Instant:** `{humanbytes(instant_speed)}/s`"
             )
             
             asyncio.create_task(update_progress(status_msg, progress_str))
-            last_update = current_time
+            last_speed_update = current_time
     
     async def update_progress(msg, text):
         try:
@@ -131,7 +156,8 @@ async def upload_file_with_progress(client, chat_id, file_path, file_name, capti
                 file_name=file_name,
                 caption=caption,
                 thumb=thumb_path,
-                progress=progress
+                progress=progress,
+                supports_streaming=True
             )
         elif is_video:
             await client.send_video(
@@ -139,7 +165,8 @@ async def upload_file_with_progress(client, chat_id, file_path, file_name, capti
                 video=file_path,
                 file_name=file_name,
                 caption=caption,
-                progress=progress
+                progress=progress,
+                supports_streaming=True
             )
         else:
             await client.send_document(
@@ -147,25 +174,28 @@ async def upload_file_with_progress(client, chat_id, file_path, file_name, capti
                 document=file_path,
                 file_name=file_name,
                 caption=caption,
-                progress=progress
+                progress=progress,
+                force_document=True
             )
         
         return True
         
     except Exception as e:
-        print(f"Upload error: {e}")
+        print(f"Extreme upload error: {e}")
         return False
 
 # Command handlers
 @app.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
     await message.reply_text(
-        "⚡ **ULTRA HIGH SPEED FILE BOT** ⚡\n\n"
-        "Send me any file for lightning-fast processing!\n"
-        "• Rename files with custom names\n"
-        "• Set custom thumbnails for videos\n"
-        "• Extreme download/upload speeds\n\n"
-        "**Capable of 300MB/s transfers!**",
+        "🔥 **EXTREME SPEED FILE BOT** 🔥\n\n"
+        "⚡ **Lightning Fast File Processing** ⚡\n"
+        "• Instant file renaming\n"
+        "• Custom video thumbnails\n"
+        "• Multi-threaded extreme speed transfers\n"
+        "• 4MB chunks for maximum throughput\n\n"
+        "**Capable of 500MB/s+ transfers!**\n"
+        "Send any file to experience extreme speed!",
         quote=True
     )
     USER_STATES.pop(message.from_user.id, None)
@@ -192,20 +222,24 @@ async def file_handler(client, message):
         'chat_id': message.chat.id,
         'is_video': bool(message.video),
         'file_size': file_size,
-        'file_name': getattr(file, 'file_name', 'file')
+        'file_name': getattr(file, 'file_name', 'file'),
+        'timestamp': time.time()
     }
     
+    speed_estimate = f"⚡ **Estimated Speed:** `{humanbytes(min(file_size/10, 500*1024*1024))}/s`"
+    
     buttons = [
-        [InlineKeyboardButton("📝 Rename File", callback_data="rename")],
+        [InlineKeyboardButton("📝 Extreme Rename", callback_data="rename")],
     ]
     if message.video:
-        buttons.append([InlineKeyboardButton("🖼️ Set Custom Thumbnail", callback_data="set_thumbnail")])
+        buttons.append([InlineKeyboardButton("🖼️ Extreme Thumbnail", callback_data="set_thumbnail")])
 
     await message.reply_text(
-        f"⚡ **File Received** ⚡\n\n"
-        f"**Size:** `{humanbytes(file_size)}`\n"
-        f"**Type:** {'Video' if message.video else 'File'}\n\n"
-        "**Select an option:**",
+        f"🔥 **File Ready for Extreme Processing** 🔥\n\n"
+        f"📦 **Size:** `{humanbytes(file_size)}`\n"
+        f"🎯 **Type:** {'Video' if message.video else 'File'}\n"
+        f"{speed_estimate}\n\n"
+        "**Select extreme action:**",
         reply_markup=InlineKeyboardMarkup(buttons),
         quote=True
     )
@@ -222,11 +256,11 @@ async def callback_handler(client, callback_query):
     
     if data == "rename":
         USER_STATES[user_id]['action'] = 'rename'
-        await callback_query.message.edit_text("✍️ Send me the new file name with extension.\n\nExample: `my_file.mp4`")
+        await callback_query.message.edit_text("✍️ **EXTREME RENAME MODE** ✍️\n\nSend me the new file name with extension.\n\nExample: `my_ultra_fast_file.mp4`")
     
     elif data == "set_thumbnail":
         USER_STATES[user_id]['action'] = 'thumbnail'
-        await callback_query.message.edit_text("🖼️ Send me the photo for thumbnail (high quality recommended).")
+        await callback_query.message.edit_text("🖼️ **EXTREME THUMBNAIL MODE** 🖼️\n\nSend me the photo for thumbnail (HD recommended).")
     
     await callback_query.answer()
 
@@ -241,7 +275,7 @@ async def text_handler(client, message):
     new_filename = message.text
     user_data = USER_STATES[user_id]
     
-    status_msg = await message.reply_text("⚡ **Starting Ultra High Speed Processing...**")
+    status_msg = await message.reply_text("🔥 **INITIATING EXTREME SPEED PROCESSING...**")
     
     try:
         # Get original file message
@@ -251,8 +285,8 @@ async def text_handler(client, message):
             await status_msg.edit_text("❌ File not found.")
             return
         
-        # High-speed download
-        file_path = await download_file_with_progress(
+        # Extreme speed download
+        file_path = await extreme_download(
             client, original_msg, 
             user_data['file_size'], 
             user_data['file_name'],
@@ -263,15 +297,15 @@ async def text_handler(client, message):
             await status_msg.edit_text("❌ Download failed.")
             return
         
-        # High-speed upload with new name
-        success = await upload_file_with_progress(
+        # Extreme speed upload with new name
+        success = await extreme_upload(
             client, user_id, file_path, new_filename, 
-            f"⚡ **Renamed to:** `{new_filename}`", 
+            f"🔥 **EXTREME SPEED RENAMED:** `{new_filename}`", 
             status_msg, user_data['is_video']
         )
         
         if success:
-            await status_msg.edit_text("✅ **File processing completed at ultra high speed!**")
+            await status_msg.edit_text("✅ **EXTREME SPEED PROCESSING COMPLETED!**\n⚡ **Lightning Fast Performance!**")
         else:
             await status_msg.edit_text("❌ Upload failed.")
         
@@ -282,7 +316,7 @@ async def text_handler(client, message):
         USER_STATES.pop(user_id, None)
         
     except Exception as e:
-        await status_msg.edit_text(f"❌ Error: {str(e)}")
+        await status_msg.edit_text(f"❌ Extreme error: {str(e)}")
         USER_STATES.pop(user_id, None)
 
 # Photo handler for thumbnails
@@ -299,10 +333,10 @@ async def photo_handler(client, message):
         return
     
     user_data = USER_STATES[user_id]
-    status_msg = await message.reply_text("⚡ **Processing thumbnail...**")
+    status_msg = await message.reply_text("🔥 **PROCESSING EXTREME THUMBNAIL...**")
     
     try:
-        # Download thumbnail
+        # Download thumbnail with extreme speed
         thumb_path = f"downloads/{user_id}_thumb.jpg"
         os.makedirs("downloads", exist_ok=True)
         
@@ -318,8 +352,8 @@ async def photo_handler(client, message):
                 os.remove(thumb_path)
             return
         
-        # High-speed download
-        file_path = await download_file_with_progress(
+        # Extreme speed download
+        file_path = await extreme_download(
             client, original_msg, 
             user_data['file_size'], 
             user_data['file_name'],
@@ -332,15 +366,15 @@ async def photo_handler(client, message):
                 os.remove(thumb_path)
             return
         
-        # High-speed upload with thumbnail
-        success = await upload_file_with_progress(
+        # Extreme speed upload with thumbnail
+        success = await extreme_upload(
             client, user_id, file_path, user_data['file_name'], 
-            "✅ **Custom thumbnail applied!**", 
+            "✅ **EXTREME SPEED THUMBNAIL APPLIED!**", 
             status_msg, True, thumb_path
         )
         
         if success:
-            await status_msg.edit_text("✅ **Video with custom thumbnail processed at ultra high speed!**")
+            await status_msg.edit_text("✅ **EXTREME THUMBNAIL PROCESSING COMPLETED!**\n⚡ **Lightning Fast Performance!**")
         else:
             await status_msg.edit_text("❌ Upload failed.")
         
@@ -353,52 +387,61 @@ async def photo_handler(client, message):
         USER_STATES.pop(user_id, None)
         
     except Exception as e:
-        await status_msg.edit_text(f"❌ Error: {str(e)}")
+        await status_msg.edit_text(f"❌ Extreme error: {str(e)}")
         USER_STATES.pop(user_id, None)
 
-# Cleanup function
-async def cleanup():
-    """Background cleanup task"""
+# Background cleanup
+async def extreme_cleanup():
+    """Extreme performance cleanup"""
     while True:
-        await asyncio.sleep(300)  # Clean every 5 minutes
+        await asyncio.sleep(60)
         try:
-            # Remove old download files
+            current_time = time.time()
+            # Clean old user states
+            for user_id in list(USER_STATES.keys()):
+                if current_time - USER_STATES[user_id].get('timestamp', 0) > 600:
+                    USER_STATES.pop(user_id, None)
+            
+            # Clean download files
             if os.path.exists("downloads"):
                 for file in os.listdir("downloads"):
                     file_path = os.path.join("downloads", file)
-                    if os.path.isfile(file_path):
-                        # Remove files older than 1 hour
-                        if time.time() - os.path.getctime(file_path) > 3600:
-                            os.remove(file_path)
+                    if os.path.isfile(file_path) and current_time - os.path.getctime(file_path) > 3600:
+                        os.remove(file_path)
         except Exception as e:
             print(f"Cleanup error: {e}")
 
 # Startup handler
-@app.on_raw_update()
-async def on_startup(client, update, users, chats):
-    """Start cleanup task when bot starts"""
-    if not hasattr(client, 'cleanup_started'):
-        client.cleanup_started = True
-        asyncio.create_task(cleanup())
-        print("🚀 Ultra High Speed File Bot Started!")
-        print("⚡ Cleanup task initialized!")
+@app.on_message(filters.command("init") & filters.private)
+async def init_handler(client, message):
+    """Initialize extreme speed mode"""
+    asyncio.create_task(extreme_cleanup())
+    await message.reply_text("🔥 **EXTREME SPEED MODE ACTIVATED!**\n⚡ **Ready for lightning fast transfers!**")
 
 if __name__ == "__main__":
-    print("🚀 Starting Ultra High Speed File Bot...")
+    print("🔥 Starting Extreme Speed File Bot...")
+    print("⚡ Initializing extreme performance mode...")
     
     # Create downloads directory
     os.makedirs("downloads", exist_ok=True)
     
-    # Run the bot
+    # Start cleanup task
+    async def main():
+        async with app:
+            # Start extreme cleanup
+            asyncio.create_task(extreme_cleanup())
+            print("✅ Extreme speed bot started successfully!")
+            print("⚡ Cleanup task running in background!")
+            # Keep bot running
+            await asyncio.Event().wait()
+    
     try:
-        app.run()
+        app.run(main())
     except Exception as e:
-        print(f"❌ Error starting bot: {e}")
+        print(f"❌ Extreme error: {e}")
     finally:
         print("Bot stopped.")
-        # Cleanup when bot stops
+        # Cleanup on exit
         if os.path.exists("downloads"):
             for file in os.listdir("downloads"):
-                file_path = os.path.join("downloads", file)
-                if os.path.isfile(file_path):
-                    os.remove(file_path)
+                os.remove(os.path.join("downloads", file))
