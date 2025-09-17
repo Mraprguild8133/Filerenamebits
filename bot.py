@@ -15,7 +15,7 @@ load_dotenv()
 API_ID = os.environ.get("API_ID")
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_ID = os.environ.get("6300568870")
+ADMIN_ID = os.environ.get("ADMIN_ID")
 PORT = int(os.environ.get("PORT", 5000))
 
 # --- Bot Initialization ---
