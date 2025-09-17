@@ -1,14 +1,19 @@
 import os
 import time
 import asyncio
-import threading
+import logging
 from datetime import datetime
 from dotenv import load_dotenv
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
-from pyrogram.errors import MessageNotModified
-from flask import Flask, jsonify
-import requests
+from pyrogram.errors import MessageNotModified, AuthBytesInvalid
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -21,38 +26,10 @@ PORT = int(os.environ.get("PORT", 5000))
 
 # Verify credentials
 if not all([API_ID, API_HASH, BOT_TOKEN]):
-    print("❌ Error: Missing environment variables")
+    logger.error("Missing environment variables")
     exit(1)
 
-# Create Flask app for Render port requirements
-flask_app = Flask(__name__)
-
-@flask_app.route('/')
-def home():
-    return jsonify({
-        "status": "online",
-        "service": "Telegram File Bot",
-        "uptime": time.time() - bot_start_time if 'bot_start_time' in globals() else 0,
-        "port": PORT
-    })
-
-@flask_app.route('/health')
-def health():
-    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
-
-@flask_app.route('/status')
-def status():
-    return jsonify({
-        "active_users": len(user_data) if 'user_data' in globals() else 0,
-        "transfers_completed": transfer_stats['transfers_completed'] if 'transfer_stats' in globals() else 0
-    })
-
-def run_flask():
-    """Run Flask server"""
-    print(f"🌐 Starting Flask server on port {PORT}...")
-    flask_app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
-
-# Global variables (will be initialized in main)
+# Global variables
 user_data = {}
 transfer_stats = {
     'total_downloaded': 0,
@@ -113,22 +90,129 @@ async def update_progress(current, total, message, start_time, action):
         
         return speed
     except Exception as e:
-        print(f"Progress error: {e}")
+        logger.error(f"Progress error: {e}")
         return 0
+
+# Initialize bot with proper session management
+def create_bot_client():
+    """Create bot client with fresh session"""
+    session_name = f"bot_session_{int(time.time())}"
+    return Client(
+        session_name,
+        api_id=int(API_ID),
+        api_hash=API_HASH,
+        bot_token=BOT_TOKEN,
+        workers=20,
+        max_concurrent_transmissions=10
+    )
+
+async def handle_file_processing(app, message, user_info, new_filename):
+    """Handle file processing with proper error handling"""
+    status_msg = None
+    file_path = None
+    
+    try:
+        status_msg = await message.reply_text("🚀 **Starting transfer...**")
+        start_time = time.time()
+        
+        # Get original message
+        original_msg = await app.get_messages(user_info['chat_id'], user_info['message_id'])
+        if not original_msg:
+            await status_msg.edit_text("❌ Original file not found.")
+            return
+        
+        # Create downloads directory with unique name
+        download_dir = f"downloads_{user_info['user_id']}_{int(time.time())}"
+        os.makedirs(download_dir, exist_ok=True)
+        download_path = os.path.join(download_dir, user_info['file_name'])
+        
+        # Download file
+        file_path = await app.download_media(
+            message=original_msg,
+            file_name=download_path,
+            progress=lambda current, total: asyncio.create_task(
+                update_progress(current, total, status_msg, start_time, "Downloading")
+            )
+        )
+        
+        if not file_path or not os.path.exists(file_path):
+            await status_msg.edit_text("❌ Download failed.")
+            return
+        
+        transfer_stats['total_downloaded'] += user_info['file_size']
+        
+        # Upload file
+        if user_info['file_type'] == 'video':
+            await app.send_video(
+                chat_id=user_info['user_id'],
+                video=file_path,
+                file_name=new_filename,
+                caption=f"✅ **Renamed:** `{new_filename}`",
+                progress=lambda current, total: asyncio.create_task(
+                    update_progress(current, total, status_msg, start_time, "Uploading")
+                )
+            )
+        else:
+            await app.send_document(
+                chat_id=user_info['user_id'],
+                document=file_path,
+                file_name=new_filename,
+                caption=f"✅ **Renamed:** `{new_filename}`",
+                progress=lambda current, total: asyncio.create_task(
+                    update_progress(current, total, status_msg, start_time, "Uploading")
+                )
+            )
+        
+        transfer_stats['total_uploaded'] += user_info['file_size']
+        transfer_stats['transfers_completed'] += 1
+        
+        total_time = time.time() - start_time
+        avg_speed = user_info['file_size'] / total_time if total_time > 0 else 0
+        
+        await status_msg.edit_text(
+            f"✅ **Transfer Complete!** ✅\n\n"
+            f"📁 **File:** `{new_filename}`\n"
+            f"⚡ **Average Speed:** `{humanbytes(avg_speed)}/s`\n"
+            f"⏱️ **Total Time:** `{time.strftime('%M:%S', time.gmtime(total_time))}`\n"
+            f"📦 **Size:** `{humanbytes(user_info['file_size'])}`"
+        )
+        
+    except AuthBytesInvalid:
+        logger.error("Auth bytes invalid - session issue")
+        if status_msg:
+            await status_msg.edit_text("🔁 **Session expired. Please restart the bot.**")
+    except Exception as e:
+        logger.error(f"File processing error: {e}")
+        if status_msg:
+            await status_msg.edit_text("❌ Error during file processing. Please try again.")
+    finally:
+        # Cleanup
+        if file_path and os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+                # Remove directory if empty
+                dir_path = os.path.dirname(file_path)
+                if os.path.exists(dir_path) and not os.listdir(dir_path):
+                    os.rmdir(dir_path)
+            except:
+                pass
 
 async def main():
     """Main async function to run the bot"""
-    # Bot initialization
-    app = Client(
-        "power_speed_bot", 
-        api_id=int(API_ID), 
-        api_hash=API_HASH, 
-        bot_token=BOT_TOKEN
-    )
+    app = create_bot_client()
     
-    # Command handlers
+    # Store the last message time per user to prevent duplicates
+    last_message_time = {}
+    
     @app.on_message(filters.command("start") & filters.private)
     async def start_handler(client, message):
+        # Prevent duplicate messages
+        user_id = message.from_user.id
+        current_time = time.time()
+        if user_id in last_message_time and current_time - last_message_time[user_id] < 2:
+            return
+        last_message_time[user_id] = current_time
+        
         uptime = time.time() - bot_start_time
         await message.reply_text(
             f"⚡ **POWER SPEED BOT** ⚡\n\n"
@@ -143,12 +227,17 @@ async def main():
             f"Send any file to experience extreme speed!",
             quote=True
         )
-        user_id = message.from_user.id
         if user_id in user_data:
             del user_data[user_id]
 
-    @app.on_message(filters.command("status") & filters.private)
+    @app.on_message(filters.command(["status", "stats"]) & filters.private)
     async def status_handler(client, message):
+        user_id = message.from_user.id
+        current_time = time.time()
+        if user_id in last_message_time and current_time - last_message_time[user_id] < 2:
+            return
+        last_message_time[user_id] = current_time
+        
         uptime = time.time() - bot_start_time
         await message.reply_text(
             f"📊 **BOT STATUS** 📊\n\n"
@@ -166,6 +255,12 @@ async def main():
 
     @app.on_message(filters.command("ping") & filters.private)
     async def ping_handler(client, message):
+        user_id = message.from_user.id
+        current_time = time.time()
+        if user_id in last_message_time and current_time - last_message_time[user_id] < 2:
+            return
+        last_message_time[user_id] = current_time
+        
         start_time = time.time()
         ping_msg = await message.reply_text("🏓 Pinging...")
         end_time = time.time()
@@ -178,27 +273,17 @@ async def main():
             f"🕒 **Server Time:** `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
         )
 
-    @app.on_message(filters.command("render") & filters.private)
-    async def render_handler(client, message):
-        """Check Render deployment status"""
-        try:
-            await message.reply_text(
-                f"🌐 **Render Deployment** 🌐\n\n"
-                f"✅ **Port:** `{PORT}` (Active)\n"
-                f"🔄 **Status:** Running\n"
-                f"📊 **Uptime:** `{time.strftime('%H:%M:%S', time.gmtime(time.time() - bot_start_time))}`\n"
-                f"👥 **Users:** `{len(user_data)}`\n"
-                f"🚀 **Ready for extreme speed transfers!**"
-            )
-        except Exception as e:
-            await message.reply_text(f"❌ Render status error: {e}")
-
-    # File handler
     @app.on_message((filters.document | filters.video | filters.audio) & filters.private)
     async def file_handler(client, message):
+        user_id = message.from_user.id
+        current_time = time.time()
+        
+        # Prevent duplicate file processing
+        if user_id in last_message_time and current_time - last_message_time[user_id] < 3:
+            return
+        last_message_time[user_id] = current_time
+        
         try:
-            user_id = message.from_user.id
-            
             file = message.video or message.document or message.audio
             if not file:
                 return
@@ -206,6 +291,7 @@ async def main():
             file_size = file.file_size
             
             user_data[user_id] = {
+                'user_id': user_id,
                 'message_id': message.id,
                 'chat_id': message.chat.id,
                 'file_type': 'video' if message.video else 'document',
@@ -230,18 +316,18 @@ async def main():
                 quote=True
             )
         except Exception as e:
-            print(f"File handler error: {e}")
+            logger.error(f"File handler error: {e}")
 
-    # Callback handler
     @app.on_callback_query()
     async def callback_handler(client, callback_query):
         try:
             user_id = callback_query.from_user.id
-            data = callback_query.data
             
             if user_id not in user_data:
                 await callback_query.answer("❌ Session expired. Send file again.", show_alert=True)
                 return
+            
+            data = callback_query.data
             
             if data == "rename":
                 user_data[user_id]['action'] = 'rename'
@@ -253,137 +339,69 @@ async def main():
             
             await callback_query.answer()
         except Exception as e:
-            print(f"Callback error: {e}")
+            logger.error(f"Callback error: {e}")
 
-    # Text handler for rename
     @app.on_message(filters.text & filters.private)
     async def text_handler(client, message):
-        try:
-            user_id = message.from_user.id
+        user_id = message.from_user.id
+        current_time = time.time()
+        
+        # Prevent duplicate processing
+        if user_id in last_message_time and current_time - last_message_time[user_id] < 2:
+            return
+        last_message_time[user_id] = current_time
+        
+        if user_id not in user_data or user_data[user_id].get('action') != 'rename':
+            return
+        
+        new_filename = message.text.strip()
+        if not new_filename:
+            await message.reply_text("❌ Please provide a valid filename")
+            return
             
-            if user_id not in user_data or user_data[user_id].get('action') != 'rename':
-                return
-            
-            new_filename = message.text.strip()
-            if not new_filename:
-                await message.reply_text("❌ Please provide a valid filename")
-                return
-                
-            user_info = user_data[user_id]
-            
-            status_msg = await message.reply_text("🚀 **Starting transfer...**")
-            start_time = time.time()
-            
-            # Get original message
-            original_msg = await client.get_messages(user_info['chat_id'], user_info['message_id'])
-            if not original_msg:
-                await status_msg.edit_text("❌ Original file not found.")
-                return
-            
-            # Create downloads directory
-            os.makedirs("downloads", exist_ok=True)
-            download_path = f"downloads/{user_id}_{int(time.time())}"
-            
-            # Download file
-            file_path = await client.download_media(
-                message=original_msg,
-                file_name=download_path,
-                progress=lambda current, total: asyncio.create_task(
-                    update_progress(current, total, status_msg, start_time, "Downloading")
-                )
-            )
-            
-            if not file_path or not os.path.exists(file_path):
-                await status_msg.edit_text("❌ Download failed.")
-                return
-            
-            transfer_stats['total_downloaded'] += user_info['file_size']
-            
-            # Upload file
-            if user_info['file_type'] == 'video':
-                await client.send_video(
-                    chat_id=user_id,
-                    video=file_path,
-                    file_name=new_filename,
-                    caption=f"✅ **Renamed:** `{new_filename}`",
-                    progress=lambda current, total: asyncio.create_task(
-                        update_progress(current, total, status_msg, start_time, "Uploading")
-                    )
-                )
-            else:
-                await client.send_document(
-                    chat_id=user_id,
-                    document=file_path,
-                    file_name=new_filename,
-                    caption=f"✅ **Renamed:** `{new_filename}`",
-                    progress=lambda current, total: asyncio.create_task(
-                        update_progress(current, total, status_msg, start_time, "Uploading")
-                    )
-                )
-            
-            transfer_stats['total_uploaded'] += user_info['file_size']
-            transfer_stats['transfers_completed'] += 1
-            
-            total_time = time.time() - start_time
-            avg_speed = user_info['file_size'] / total_time if total_time > 0 else 0
-            
-            await status_msg.edit_text(
-                f"✅ **Transfer Complete!** ✅\n\n"
-                f"📁 **File:** `{new_filename}`\n"
-                f"⚡ **Average Speed:** `{humanbytes(avg_speed)}/s`\n"
-                f"⏱️ **Total Time:** `{time.strftime('%M:%S', time.gmtime(total_time))}`\n"
-                f"📦 **Size:** `{humanbytes(user_info['file_size'])}`"
-            )
-            
-            # Cleanup
-            try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-            except:
-                pass
-                
-            if user_id in user_data:
-                del user_data[user_id]
-                
-        except Exception as e:
-            print(f"Text handler error: {e}")
-            try:
-                await message.reply_text("❌ Error during file processing")
-            except:
-                pass
+        user_info = user_data[user_id]
+        
+        # Process file in background to avoid blocking
+        asyncio.create_task(handle_file_processing(app, message, user_info, new_filename))
+        
+        # Remove user data after processing starts
+        if user_id in user_data:
+            del user_data[user_id]
 
     # Start the bot
-    print("🤖 Starting Telegram bot...")
+    logger.info("🤖 Starting Telegram bot...")
     await app.start()
-    print("✅ Bot started successfully!")
+    
+    # Get bot info
+    me = await app.get_me()
+    logger.info(f"✅ Bot started successfully! @{me.username}")
     
     # Keep the bot running
     await asyncio.Event().wait()
 
-# Start Flask server in background thread
-def start_flask():
-    """Start Flask server for Render"""
-    run_flask()
-
 if __name__ == "__main__":
-    print("🚀 Starting Power Speed Bot for Render...")
+    print("🚀 Starting Power Speed Bot...")
     print(f"🌐 Port: {PORT}")
     
     # Create downloads directory
     os.makedirs("downloads", exist_ok=True)
     
-    # Start Flask server in a separate thread
-    flask_thread = threading.Thread(target=start_flask, daemon=True)
-    flask_thread.start()
-    
-    print("✅ Flask server started in background")
-    
-    # Run the bot in the main thread
     try:
+        # Run the bot with session recovery
         asyncio.run(main())
+    except AuthBytesInvalid:
+        logger.error("Auth bytes invalid - clearing session and restarting...")
+        # Clean up session files and restart
+        session_files = [f for f in os.listdir('.') if f.startswith('bot_session_')]
+        for file in session_files:
+            try:
+                os.remove(file)
+            except:
+                pass
+        print("🔄 Session cleared. Please restart the bot.")
     except KeyboardInterrupt:
         print("🛑 Bot stopped by user")
     except Exception as e:
-        print(f"❌ Error: {e}")
+        logger.error(f"❌ Error: {e}")
     finally:
         print("🛑 Bot shutdown complete")
