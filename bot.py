@@ -4,6 +4,7 @@
 import os
 import time
 import logging
+import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait
@@ -25,8 +26,6 @@ bot = Client(
 )
 
 # --- In-memory storage for user states ---
-# A simple dictionary to store the message ID of the file to be renamed
-# key: user_id, value: message_id
 user_states = {}
 
 # --- Helper Functions & Progress Bar ---
@@ -35,14 +34,13 @@ def progress_bar(current, total, ud_type, message, start):
     now = time.time()
     diff = now - start
     if diff == 0:
-        diff = 0.01  # Avoid division by zero
+        diff = 0.01
 
     percentage = current * 100 / total
     speed = current / diff
     elapsed_time = round(diff)
     time_to_completion = round((total - current) / speed) if speed > 0 else 0
     
-    # Format file sizes
     total_size = humanbytes(total)
     current_size = humanbytes(current)
 
@@ -54,9 +52,9 @@ def progress_bar(current, total, ud_type, message, start):
         f"**╰ ETA: **{time_formatter(time_to_completion)}"
     )
     
-    # Edit the message with the new progress
     try:
-        message.edit_text(text=progress_str)
+        if message.text != progress_str:
+            message.edit_text(text=progress_str)
     except FloodWait as e:
         time.sleep(e.x)
     except Exception as e:
@@ -97,8 +95,8 @@ def time_formatter(seconds: int) -> str:
 
 # --- Command Handlers ---
 
-# Decorator for authorized users
 def authorized_users_only(func):
+    """Decorator to check if the user is authorized."""
     async def wrapper(client, message):
         if message.from_user.id in AUTH_USERS:
             await func(client, message)
@@ -139,12 +137,15 @@ async def handle_file(client, message: Message):
     if not os.path.isdir(DOWNLOAD_DIR):
         os.makedirs(DOWNLOAD_DIR)
 
-    # Store the file's message ID to know which file to rename
-    user_states[message.from_user.id] = message.message_id
+    # --- FIX APPLIED HERE ---
+    # Changed message.message_id to message.id
+    user_states[message.from_user.id] = message.id
     
     await message.reply_text(
         "File received! Now, please reply to this message with the **new file name** (including the extension).",
-        reply_to_message_id=message.message_id
+        # --- FIX APPLIED HERE ---
+        # Changed reply_to_message_id=message.message_id to reply_to_message_id=message.id
+        reply_to_message_id=message.id
     )
 
 @bot.on_message(filters.private & filters.text & ~filters.command(["start", "help"]))
@@ -153,7 +154,6 @@ async def rename_file(client, message: Message):
     """Renames the file based on the user's text reply."""
     user_id = message.from_user.id
     
-    # Check if we are expecting a filename from this user
     if user_id not in user_states:
         await message.reply_text("Please send a file first before providing a new name.")
         return
@@ -185,7 +185,6 @@ async def rename_file(client, message: Message):
         await status_message.edit(f"Failed to download file. Error: {e}")
         return
 
-    # Handle cases where download fails but doesn't raise an exception
     if not file_path or not os.path.exists(file_path):
         await status_message.edit("Download failed. File path not found.")
         return
@@ -204,50 +203,45 @@ async def rename_file(client, message: Message):
 
     await status_message.edit("Uploading renamed file...")
     
-    # Determine the correct function to send the file back
-    file_type = None
+    file_type_sender = None
     file_info = None
     if original_file_message.document:
-        file_type = client.send_document
+        file_type_sender = client.send_document
         file_info = original_file_message.document
     elif original_file_message.video:
-        file_type = client.send_video
+        file_type_sender = client.send_video
         file_info = original_file_message.video
     elif original_file_message.audio:
-        file_type = client.send_audio
+        file_type_sender = client.send_audio
         file_info = original_file_message.audio
 
-    if file_type:
+    if file_type_sender:
         try:
             upload_start_time = time.time()
-            # Prepare arguments for sending the file
             kwargs = {
                 'chat_id': message.chat.id,
                 'file_name': new_file_name,
                 'progress': progress_bar,
                 'progress_args': ("Uploading...", status_message, upload_start_time)
             }
-            # Copy metadata if available
             if file_info and hasattr(file_info, 'duration'): kwargs['duration'] = file_info.duration
             if file_info and hasattr(file_info, 'width'): kwargs['width'] = file_info.width
             if file_info and hasattr(file_info, 'height'): kwargs['height'] = file_info.height
             if file_info and hasattr(file_info, 'performer'): kwargs['performer'] = file_info.performer
             if file_info and hasattr(file_info, 'title'): kwargs['title'] = file_info.title
             
-            # The actual file path is the first argument
-            await file_type(new_path, **kwargs)
+            await file_type_sender(new_path, **kwargs)
 
         except FloodWait as fw:
             LOGGER.warning(f"FloodWait: Sleeping for {fw.x} seconds.")
             await asyncio.sleep(fw.x)
-            await file_type(new_path, **kwargs) # Retry
+            await file_type_sender(new_path, **kwargs)
         except Exception as e:
             LOGGER.error(f"Error uploading file: {e}")
             await status_message.edit(f"Failed to upload file. Error: {e}")
     else:
         await status_message.edit("Unsupported file type for upload.")
 
-    # --- Cleanup ---
     await status_message.delete()
     if os.path.exists(new_path):
         os.remove(new_path)
