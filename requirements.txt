@@ -7,3 +7,4 @@ humanize
 python-telegram-bot
 requests
 pyTelegramBotAPI
+flask
