@@ -9,3 +9,5 @@ requests>=2.32.5
 pyTelegramBotAPI>=4.29.1
 flask>=3.1.2
 ffmpeg-python>=0.2.0
+psutil>=7.0.0
+pillow>=11.3.0
