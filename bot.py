@@ -42,8 +42,8 @@ app = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    workers=200,  # Increased workers for better concurrency
-    max_concurrent_transmissions=50,  # Higher transmission limit
+    workers=300,  # Increased workers for better concurrency
+    max_concurrent_transmissions=150,  # Higher transmission limit
 )
 
 # --- Simple Flask Web Server ---
